@@ -47,7 +47,7 @@ JOIN_URLS=https://t.me/I_VIP_RADHE_II,https://t.me/+rdXT1GR_nCg1OTg1,https://t.m
 
 # Payment Credentials
 CWALLET_ID=93020854
-UPI_ID=vinit-godara@fam
+UPI_ID=bobbyahirwar@fam
 
 # MongoDB connection
 MONGODB_URI=mongodb+srv://username:password@cluster.example/numbott

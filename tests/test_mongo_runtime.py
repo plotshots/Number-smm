@@ -115,6 +115,29 @@ class MongoRuntimeTests(unittest.TestCase):
         self.assertEqual(stored["amount"], 250)
         self.assertEqual(stored["status"], "pending")
 
+    def test_auto_upi_order_contains_verification_contract(self):
+        from datetime import timedelta
+
+        self.repository.ensure_user(101)
+        expires_at = self.repository._now() + timedelta(minutes=10)
+        order = self.repository.create_auto_upi_order(
+            101, 100, 100, "NMB-101-ABC123", expires_at,
+        )
+
+        self.assertEqual(order["user_id"], 101)
+        self.assertEqual(order["base_amount"], 100)
+        self.assertEqual(order["payable_amount"], 100)
+        self.assertEqual(order["purpose"], "NMB-101-ABC123")
+        self.assertEqual(order["status"], "pending")
+        self.assertIsNotNone(order["created_at"])
+        self.assertEqual(order["expires_at"], expires_at)
+        stored = self.repository.db.upi_orders.find_one({"_id": "NMB-101-ABC123"})
+        self.assertEqual(stored["user_id"], order["user_id"])
+        self.assertEqual(stored["base_amount"], order["base_amount"])
+        self.assertEqual(stored["payable_amount"], order["payable_amount"])
+        self.assertEqual(stored["purpose"], order["purpose"])
+        self.assertEqual(stored["status"], order["status"])
+
     def test_manual_deposit_accept_and_custom_amount_are_one_time(self):
         self.repository.ensure_user(101)
         exact, _ = self.repository.create_manual_deposit(101, 250, "ManualUPI", "file-1", 101, 9001)

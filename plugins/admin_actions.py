@@ -399,8 +399,7 @@ async def admin_actions(event):
         dep_mode = dep_mode_res[0] if dep_mode_res and dep_mode_res[0] else "auto"
         mode_label = "🟢 Auto (IMAP UTR)" if dep_mode == 'auto' else ("⚡ Hybrid (Auto + Fallback)" if dep_mode == 'hybrid' else "📂 Manual (Screenshots)")
         
-        upi_res = cur.execute("SELECT value FROM settings WHERE key='upi_id'").fetchone()
-        active_upi = upi_res[0] if upi_res and upi_res[0] else "vinit-godara@fam"
+        active_upi = AUTO_UPI_ID
         
         gmail_res = cur.execute("SELECT value FROM settings WHERE key='gmail_user'").fetchone()
         active_gmail = gmail_res[0] if gmail_res and gmail_res[0] else "vinitgodaragodara3@gmail.com"
@@ -431,8 +430,7 @@ async def admin_actions(event):
         # re-render menu
         dep_mode = nxt
         mode_label = "🟢 Auto (IMAP UTR)" if dep_mode == 'auto' else ("⚡ Hybrid (Auto + Fallback)" if dep_mode == 'hybrid' else "📂 Manual (Screenshots)")
-        upi_res = cur.execute("SELECT value FROM settings WHERE key='upi_id'").fetchone()
-        active_upi = upi_res[0] if upi_res and upi_res[0] else "vinit-godara@fam"
+        active_upi = AUTO_UPI_ID
         gmail_res = cur.execute("SELECT value FROM settings WHERE key='gmail_user'").fetchone()
         active_gmail = gmail_res[0] if gmail_res and gmail_res[0] else "vinitgodaragodara3@gmail.com"
         
@@ -1040,7 +1038,7 @@ async def admin_actions(event):
                 await conv.send_message(f"{P_YES} <b>All Must-Join Channels & Links Updated!</b> ({len(ch_list)} channels set)")
 
             elif action_data == "change_upi" and has_perm(uid, 'p_settings'):
-                resp = await get_reply(f"🆔 <b>Enter new UPI ID:</b>\n<i>Example: vinit-godara@fam</i>")
+                resp = await get_reply(f"🆔 <b>Enter new UPI ID:</b>\n<i>Example: bobbyahirwar@fam</i>")
                 new_upi = resp.text.strip()
                 cur.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('upi_id', ?)", (new_upi,))
                 db.commit()

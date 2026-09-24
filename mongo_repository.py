@@ -469,6 +469,24 @@ class MongoRepository:
             return self.db.deposits.find_one({"source_key": source_key}), False
         return document, True
 
+    def create_auto_upi_order(self, user_id, base_amount, payable_amount,
+                              purpose, expires_at):
+        """Create a pending Auto UPI order for a later asynchronous verifier."""
+        document = {
+            "_id": str(purpose),
+            "order_id": str(purpose),
+            "user_id": int(user_id),
+            "base_amount": int(base_amount),
+            "payable_amount": int(payable_amount),
+            "amount": int(payable_amount),
+            "purpose": str(purpose),
+            "status": "pending",
+            "created_at": self._now(),
+            "expires_at": expires_at,
+        }
+        self.db.upi_orders.insert_one(document)
+        return document
+
     def set_setting(self, key, value):
         self.db.settings.update_one({"_id": key}, {"$set": {"key": key, "value": value}}, upsert=True)
 

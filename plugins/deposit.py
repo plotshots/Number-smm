@@ -3,10 +3,12 @@ import re
 import html
 import urllib.parse
 import io
+import uuid
+from datetime import timedelta
 from telethon import events, Button
 from telethon.errors import MessageNotModifiedError
 from database import cur, db, get_usdt_rate, update_balance, approve_deposit, to_usd, get_log_channels_db, is_admin, repository
-from config import PE_GIFT, PE_LIGHTNING, P_MONEY, P_CARD, P_UPI, P_CW, P_NO, P_YES, P_WARN, P_INR, P_USDT, P_KEY, PE_CHECK, P_ACC, P_ID, LOG_CHANNEL_ID, LOG_CHANNELS, ADMIN_ID, SUPER_ADMINS, CWALLET_QR, CWALLET_ID, UPI_ID, bot, logger
+from config import AUTO_CANCEL_SECONDS, AUTO_UPI_ID, PE_GIFT, PE_LIGHTNING, P_MONEY, P_CARD, P_UPI, P_CW, P_NO, P_YES, P_WARN, P_INR, P_USDT, P_KEY, PE_CHECK, P_ACC, P_ID, LOG_CHANNEL_ID, LOG_CHANNELS, ADMIN_ID, SUPER_ADMINS, CWALLET_QR, CWALLET_ID, UPI_ID, bot, logger
 from utils.keyboards import style_btn
 from utils.states import deposit_input, waiting_proof, admin_dep_state, custom_dep_amt, get_user_lock
 from utils.banners import send_bannered_message
@@ -38,6 +40,14 @@ async def deposit_menu(event):
     else: await event.respond(msg, buttons=btns)
 
 async def manual_deposit_init(event, method):
+    if method == "AutoUPI":
+        uid = event.sender_id
+        deposit_input[uid] = {'step': 'keypad', 'method': method, 'amount': ''}
+        return await event.edit(
+            f"{P_MONEY} <b>𝐄ɴᴛᴇʀ 𝐀ᴍᴏᴜɴᴛ</b>\n\n"
+            f"<blockquote>𝐄ɴᴛᴇʀ ʏᴏᴜʀ 𝐑ᴇᴄʜᴀʀɢᴇ 𝐀ᴍᴏᴜɴᴛ ᴜsɪɴɢ ᴛʜᴇ ᴋᴇʏᴘᴀᴅ.</blockquote>",
+            buttons=get_keypad(),
+        )
     uid = event.sender_id
     deposit_input[uid] = {'step': 'wait_amt', 'method': method}
     await event.edit(f"{P_MONEY} <b>𝐄ɴᴛᴇʀ 𝐃ᴇᴘᴏsɪᴛ 𝐀ᴍᴏᴜɴᴛ (ɪɴ {P_INR}):</b>\n\n<i>𝐌ɪɴɪᴍᴜᴍ ᴅᴇᴘᴏsɪᴛ ɪs {P_INR}10.</i>", buttons=[[Button.inline("❌ 𝐂ᴀɴᴄᴇʟ", "cancel_action")]])
@@ -86,6 +96,40 @@ def get_keypad():
         [style_btn("𝐂ᴀɴᴄᴇʟ", b"cancel_action", style_type="danger", icon=5796170975699544141)]
     ]
 
+def _keypad_message(amount):
+    shown_amount = amount or "0"
+    return f"{P_MONEY} <b>𝐄ɴᴛᴇʀ 𝐀ᴍᴏᴜɴᴛ</b>\n\n<blockquote>{P_INR}<code>{shown_amount}</code></blockquote>"
+
+async def create_auto_upi_payment(event, amount):
+    uid = event.sender_id
+    amount = int(amount)
+    purpose = f"NMB-{uid}-{uuid.uuid4().hex[:12].upper()}"
+    expires_at = repository._now() + timedelta(seconds=AUTO_CANCEL_SECONDS)
+    order = repository.create_auto_upi_order(uid, amount, amount, purpose, expires_at)
+
+    active_upi = AUTO_UPI_ID
+    params = f"pa={active_upi}&" + urllib.parse.urlencode({
+        "pn": "Numbott",
+        "am": f"{order['payable_amount']:.2f}",
+        "cu": "INR",
+        "tn": purpose,
+    })
+    upi_url = f"upi://pay?{params}"
+    try:
+        import qrcode
+        qr = qrcode.QRCode(version=1, box_size=10, border=4)
+        qr.add_data(upi_url)
+        qr.make(fit=True)
+        img = qr.make_image(fill_color="black", back_color="white")
+        qr_file = io.BytesIO()
+        qr_file.name = "upi_qr.png"
+        img.save(qr_file, "PNG")
+        qr_file.seek(0)
+        await bot.send_file(uid, qr_file)
+    except Exception as exc:
+        logger.error("Failed to send Auto UPI QR: %s", exc)
+        await bot.send_message(uid, "❌ Unable to generate the payment QR right now. Please try again.")
+
 def register_deposit(bot):
     @bot.on(events.NewMessage(pattern=r"(?i)^(💳 𝐃ᴇᴘᴏsɪᴛ|💳 Deposit)$"))
     async def msg_deposit(e):
@@ -99,6 +143,36 @@ def register_deposit(bot):
     async def cb_choose_dep_method(e):
         method = e.pattern_match.group(1).decode()
         await manual_deposit_init(e, method)
+
+    @bot.on(events.CallbackQuery(pattern=r"^kp_(\d|del|done)$"))
+    async def cb_auto_upi_keypad(e):
+        uid = e.sender_id
+        state = deposit_input.get(uid)
+        if not state or state.get('step') != 'keypad' or state.get('method') != 'AutoUPI':
+            return await e.answer("This payment session has expired.", alert=True)
+
+        key = e.pattern_match.group(1).decode()
+        amount = state.get('amount', '')
+        if key == 'del':
+            state['amount'] = amount[:-1]
+        elif key == 'done':
+            try:
+                parsed_amount = int(amount)
+            except ValueError:
+                parsed_amount = 0
+            if parsed_amount < 10:
+                return await e.answer("Minimum recharge is ₹10.", alert=True)
+            if parsed_amount > 50000:
+                return await e.answer("Maximum recharge is ₹50,000.", alert=True)
+            deposit_input.pop(uid, None)
+            await e.answer("Payment created", alert=False)
+            return await create_auto_upi_payment(e, parsed_amount)
+        elif len(amount) < 7:
+            state['amount'] = amount + key
+        try:
+            await e.edit(_keypad_message(state.get('amount', '')), buttons=get_keypad())
+        except MessageNotModifiedError:
+            pass
 
     @bot.on(events.NewMessage(func=lambda e: e.sender_id in deposit_input and deposit_input[e.sender_id]['step'] == 'wait_amt'))
     async def msg_wait_amt(e):

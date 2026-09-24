@@ -2,7 +2,7 @@ import asyncio
 
 active_orders = {}      
 waiting_proof = {}      
-deposit_input = {} 
+deposit_input = {}
 admin_dep_state = {}    
 user_spam_cooldown = {} 
 session_buy_state = {}  

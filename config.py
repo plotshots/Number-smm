@@ -87,8 +87,9 @@ CWALLET_QR = os.getenv("CWALLET_QR", "")
 CWALLET_ID = os.getenv("CWALLET_ID", "")
 
 # UPI API DETAILS
+AUTO_UPI_ID = "bobbyahirwar@fam"
 UPI_MID = os.getenv("UPI_MID", "")
-UPI_ID = os.getenv("UPI_ID", "")
+UPI_ID = os.getenv("UPI_ID", AUTO_UPI_ID)
 
 OTP_REGEX = r"\b\d{4,8}\b"
 AUTO_CANCEL_SECONDS = 600
