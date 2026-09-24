@@ -56,11 +56,12 @@ async def send_main_menu(bot, event, uid):
         first_name = "User"
         username = "None"
         
-    home_banner = repository.get_banner("home")
-    if home_banner:
-        start_img = home_banner.get("url") if home_banner.get("enabled") else None
-    else:
-        start_img = get_start_image_url()
+    try:
+        home_banner = repository.get_banner("home", enabled_only=True)
+    except Exception as banner_error:
+        logger.warning(f"Could not load Home banner: {banner_error}")
+        home_banner = None
+    start_img = home_banner.get("file_id") if home_banner else None
     support_url = get_support_url()
     support_handle = f"@{support_url.split('/')[-1]}" if support_url.startswith("https://t.me/") else support_url
     

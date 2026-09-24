@@ -239,7 +239,7 @@ def add_log_channel_db(channel_id):
     channels = get_log_channels_db()
     if str(channel_id) not in [str(x) for x in channels]: set_log_channels_db(channels + [channel_id])
 def remove_log_channel_db(channel_id): set_log_channels_db([x for x in get_log_channels_db() if str(x) != str(channel_id)])
-def get_start_image_url(): return str(_setting("start_image") or "https://yukiapi.site/file/0z3Q9oA9").strip()
+def get_start_image_url(): return str(_setting("start_image") or "https://ibb.co/BVPMtFyk").strip()
 def set_start_image_url(url): _set_setting("start_image", url.strip())
 
 

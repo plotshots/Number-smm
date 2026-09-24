@@ -72,10 +72,10 @@ def register_banner_management(bot):
         key = e.pattern_match.group(1).decode()
         if not _allowed(e.sender_id) or key not in BANNER_SECTIONS:
             return await e.answer("Access denied.", alert=True)
-        action = "banner_url" if key == "home" else "banner_upload"
-        admin_state[e.sender_id] = {"action": action, "key": key}
-        prompt = "Send the image URL" if key == "home" else "Send the Telegram photo"
-        await e.edit(f"{prompt} for <b>{BANNER_SECTIONS[key]}</b>.", buttons=[[Button.inline("Cancel", f"banner_section|{key}")]])
+        admin_state[e.sender_id] = {"action": "banner_upload", "key": key}
+        prompt = "Send the new Home/Dashboard banner image." if key == "home" else "Send the Telegram photo"
+        prompt = prompt if key == "home" else f"{prompt} for <b>{BANNER_SECTIONS[key]}</b>."
+        await e.edit(prompt, buttons=[[Button.inline("Cancel", f"banner_section|{key}")]])
 
     @bot.on(events.CallbackQuery(pattern=r"^banner_preview\|([^|]+)$"))
     async def cb_banner_preview(e):
@@ -93,23 +93,18 @@ def register_banner_management(bot):
             return await e.answer("Preview could not be sent.", alert=True)
         await e.answer("Preview sent.")
 
-    @bot.on(events.NewMessage(func=lambda e: e.is_private and isinstance(admin_state.get(e.sender_id), dict) and admin_state[e.sender_id].get("action") == "banner_url"))
-    async def msg_banner_url(e):
-        if not _allowed(e.sender_id):
-            return
-        state = admin_state.pop(e.sender_id)
-        url = (e.raw_text or "").strip()
-        if not url.startswith(("http://", "https://")):
-            return await e.reply("❌ Please send a valid image URL starting with http:// or https://.")
-        repository.save_banner_url(state["key"], url)
-        await e.reply("✅ Home banner URL saved. It is OFF until you turn it ON.")
-
     @bot.on(events.NewMessage(func=lambda e: e.is_private and isinstance(admin_state.get(e.sender_id), dict) and admin_state[e.sender_id].get("action") == "banner_upload"))
     async def msg_banner_upload(e):
         if not _allowed(e.sender_id) or not e.photo:
             return
         state = admin_state.pop(e.sender_id)
         try:
+            if state["key"] == "home":
+                file_id = getattr(e.media.photo, "id", None)
+                if not file_id:
+                    raise ValueError("Telegram photo has no file id")
+                repository.save_banner_file_id(state["key"], file_id)
+                return await e.reply("✅ Home banner saved. It is OFF until you turn it ON.")
             content = await e.download_media(file=bytes)
             filename = getattr(e.file, "name", None) or f"{state['key']}.jpg"
             content_type = getattr(e.file, "mime_type", None) or "image/jpeg"

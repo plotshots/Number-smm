@@ -4,6 +4,7 @@ from io import BytesIO
 from telethon import events, types
 
 from database import repository
+from config import logger
 
 
 BANNER_SECTIONS = {
@@ -23,7 +24,7 @@ async def send_bannered_message(bot, event, key, caption, buttons=None, enabled_
     if not banner:
         return False
     try:
-        if banner.get("url"):
+        if banner.get("url") and key != "home":
             await bot.send_message(
                 event.chat_id,
                 f"{caption}\n<a href='{html.escape(banner['url'], quote=True)}'>&#8203;</a>",
@@ -33,6 +34,15 @@ async def send_bannered_message(bot, event, key, caption, buttons=None, enabled_
             return True
         if not banner.get("file_id"):
             return False
+        if key == "home":
+            if isinstance(event, events.CallbackQuery.Event):
+                await event.edit(caption, file=banner["file_id"], buttons=buttons, parse_mode="html")
+            else:
+                await bot.send_file(
+                    event.chat_id, banner["file_id"], caption=caption, buttons=buttons,
+                    parse_mode="html", force_document=False,
+                )
+            return True
         if isinstance(event, events.CallbackQuery.Event):
             try:
                 await event.edit(caption, buttons=buttons, parse_mode="html")
@@ -53,5 +63,6 @@ async def send_bannered_message(bot, event, key, caption, buttons=None, enabled_
             parse_mode="html", force_document=False,
         )
         return True
-    except Exception:
+    except Exception as ex:
+        logger.error(f"Banner send failed for {key}: {ex}", exc_info=True)
         return False

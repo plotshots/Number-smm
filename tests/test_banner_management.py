@@ -47,6 +47,20 @@ def test_all_banner_sections_are_independent_and_persistent():
     assert restarted.get_banner_content("missing") is None
 
 
+def test_home_file_id_only_banner_survives_restart_without_document_storage():
+    client = mongomock.MongoClient()
+    repository = MongoRepository(client=client, database_name="banner-file-id-tests")
+    repository.ensure_indexes()
+
+    saved = repository.save_banner_file_id("home", 123456789)
+    assert saved["file_id"] == "123456789"
+    assert "gridfs_id" not in saved
+    assert repository.get_banner_content("home", enabled_only=False) is None
+
+    restarted = MongoRepository(client=client, database_name="banner-file-id-tests")
+    assert restarted.get_banner("home")["file_id"] == "123456789"
+
+
 def test_buy_account_uses_one_uploaded_photo_message_with_caption_and_buttons():
     class BannerRepository:
         def get_banner(self, key, enabled_only=False):
@@ -87,3 +101,28 @@ def test_buy_account_uses_one_uploaded_photo_message_with_caption_and_buttons():
     assert "𝐒ᴇʟᴇᴄᴛ 𝐀ᴄᴄᴏᴜɴᴛ 𝐂ᴀᴛᴇɢᴏʀʏ" in caption
     assert buttons
     assert force_document is False
+
+
+def test_home_banner_sends_stored_telegram_file_id_directly():
+    class BannerRepository:
+        def get_banner(self, key, enabled_only=False):
+            return {"key": key, "enabled": True, "file_id": "telegram-home-id"}
+
+    class FakeBot:
+        def __init__(self):
+            self.sent = []
+
+        async def send_file(self, chat_id, file_id, **kwargs):
+            self.sent.append((chat_id, file_id, kwargs))
+
+    class FakeEvent:
+        chat_id = 100
+
+    from utils.banners import send_bannered_message
+
+    bot = FakeBot()
+    with patch("utils.banners.repository", BannerRepository()):
+        assert asyncio.run(send_bannered_message(bot, FakeEvent(), "home", "Dashboard"))
+
+    assert bot.sent[0][0:2] == (100, "telegram-home-id")
+    assert bot.sent[0][2]["force_document"] is False
