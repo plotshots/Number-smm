@@ -16,6 +16,7 @@ from utils.auto_upi_verifier import (
     payment_expired_text,
     payment_not_found_text,
     payment_success_text,
+    verify_pending_order,
     verify_current_user_order,
 )
 
@@ -102,11 +103,10 @@ def _auto_upi_button_signature(buttons):
 async def _edit_auto_upi_status_message(callback_query, text, buttons=None):
     target_message = getattr(callback_query, "message", None)
     if target_message is None:
-        logger.error("AUTO_UPI_CHECK: callback has no target message user_id=%s", callback_query.sender_id)
-        try:
-            await callback_query.answer("This payment message is no longer available.", alert=True)
-        except Exception:
-            logger.exception("AUTO_UPI_CHECK: failed to answer callback without target message user_id=%s", callback_query.sender_id)
+        logger.error(
+            "AUTO_UPI_CHECK: callback has no target message user_id=%s",
+            callback_query.sender_id,
+        )
         return False
 
     is_photo_message = getattr(target_message, "photo", None) is not None
@@ -198,18 +198,21 @@ async def create_auto_upi_payment(event, amount):
         qr_file.seek(0)
         await bot.send_file(uid, qr_file)
         payment_message = (
-            "🏦 <b>AUTOMATIC PAYMENT (UPI)</b>\n\n"
-            f"💰 Amount: ₹{order['payable_amount']}\n"
-            f"🆔 Order ID: {order['order_id']}\n\n"
-            "👇 Scan the QR above.\n"
-            "Click ✅ Check Payment Status after paying."
+            "🏦 𝐀ᴜᴛᴏᴍᴀᴛɪᴄ 𝐏ᴀʏᴍᴇɴᴛ (𝐔𝐏𝐈)\n\n"
+            f"💰 𝐀ᴍᴏᴜɴᴛ: ₹{order['payable_amount']}\n"
+            f"🆔 𝐎ʀᴅᴇʀ 𝐈ᴅ: {order['order_id']}\n\n"
+            "👇 𝐒ᴄᴀɴ ᴛʜᴇ 𝐐ʀ ᴀʙᴏᴠᴇ.\n"
+            "𝐂ʟɪᴄᴋ ✅ 𝐂ʜᴇᴄᴋ 𝐏ᴀʏᴍᴇɴᴛ 𝐒ᴛᴀᴛᴜs ᴀғᴛᴇʀ ᴘᴀʏɪɴɢ."
         )
         await bot.send_message(
             uid,
             payment_message,
             buttons=[
-                [Button.inline("✅ CHECK PAYMENT STATUS", b"auto_upi_check")],
-                [Button.inline("❌ CANCEL", b"auto_upi_cancel")],
+                [Button.inline(
+                    "✅ 𝐂ʜᴇᴄᴋ 𝐏ᴀʏᴍᴇɴᴛ 𝐒ᴛᴀᴛᴜs",
+                    f"auto_upi_check:{order['order_id']}".encode(),
+                )],
+                [Button.inline("❌ 𝐂ᴀɴᴄᴇʟ", b"auto_upi_cancel")],
             ],
         )
     except Exception as exc:
@@ -225,20 +228,52 @@ def register_deposit(bot):
     async def cb_deposit_menu_main(e):
         await deposit_menu(e)
 
-    @bot.on(events.CallbackQuery(pattern=b"^auto_upi_check$"))
+    @bot.on(events.CallbackQuery(pattern=rb"^auto_upi_check(?::([A-Za-z0-9_-]+))?$"))
     async def cb_auto_upi_check(e):
-        checking_text = "⏳ Checking your payment"
-        await _edit_auto_upi_status_message(e, checking_text)
+        raw_callback_data = getattr(e, "data", b"auto_upi_check")
+        callback_data = raw_callback_data.decode() if isinstance(raw_callback_data, bytes) else str(raw_callback_data)
+        pattern_match = getattr(e, "pattern_match", None)
+        order_id = pattern_match.group(1) if pattern_match else None
+        if isinstance(order_id, bytes):
+            order_id = order_id.decode()
         logger.info("AUTO_UPI_CHECK: callback received user_id=%s", e.sender_id)
-        pending_order = repository.get_current_pending_auto_upi_order(e.sender_id)
         logger.info(
-            "AUTO_UPI_CHECK: order_id=%s",
-            pending_order.get("order_id") if pending_order else None,
+            "AUTO_UPI_CHECK: callback_data parsed=%s",
+            callback_data,
         )
+        if order_id:
+            order = repository.get_auto_upi_order(e.sender_id, order_id)
+        else:
+            order = repository.get_current_pending_auto_upi_order(e.sender_id)
+        pending_order = order if order and order.get("status") == "pending" else None
+        logger.info(
+            "AUTO_UPI_CHECK: order_id resolved=%s",
+            order.get("order_id") if order else order_id,
+        )
+        logger.info(
+            "AUTO_UPI_CHECK: Mongo order %s order_id=%s",
+            "found" if order else "missing",
+            order.get("order_id") if order else order_id,
+        )
+        if not pending_order:
+            if order and order.get("status") == "expired":
+                await _edit_auto_upi_status_message(e, payment_expired_text())
+            else:
+                await e.answer("This payment session has expired or was already processed.", alert=True)
+            return
+
+        checking_text = (
+            "⏳ 𝐂ʜᴇᴄᴋɪɴɢ ʏᴏᴜʀ 𝐏ᴀʏᴍᴇɴᴛ..."
+            if order_id else "⏳ Checking your payment"
+        )
+        logger.info("AUTO_UPI_CHECK: editing result message state=checking")
+        await _edit_auto_upi_status_message(e, checking_text)
         logger.info("AUTO_UPI_CHECK: starting payment verification")
-        logger.info("AUTO_UPI_CHECK: IMAP verification started")
         try:
-            result = await verify_current_user_order(e.sender_id, bot, notify=False)
+            if order_id:
+                result = await verify_pending_order(pending_order, bot, notify=False)
+            else:
+                result = await verify_current_user_order(e.sender_id, bot, notify=False)
         except Exception:
             logger.exception(
                 "AUTO_UPI_CHECK: verification failed order_id=%s",
@@ -260,17 +295,25 @@ def register_deposit(bot):
             success_text = payment_success_text(
                 payment["amount"], payment["previous_balance"], payment["balance"],
             )
+            logger.info("AUTO_UPI_CHECK: editing result message state=paid")
             await _edit_auto_upi_status_message(e, success_text)
             return
         if result.get("status") == "expired":
             expired_text = payment_expired_text()
+            logger.info("AUTO_UPI_CHECK: editing result message state=expired")
             await _edit_auto_upi_status_message(e, expired_text)
             return
         not_found_text = payment_not_found_text()
+        resolved_order_id = pending_order.get("order_id")
         not_found_buttons = [
-            [Button.inline("✅ CHECK PAYMENT STATUS", b"auto_upi_check")],
-            [Button.inline("❌ CANCEL", b"auto_upi_cancel")],
+            [Button.inline(
+                "✅ 𝐂ʜᴇᴄᴋ 𝐏ᴀʏᴍᴇɴᴛ 𝐒ᴛᴀᴛᴜs",
+                f"auto_upi_check:{resolved_order_id}".encode(),
+            )],
+            [Button.inline("❌ 𝐂ᴀɴᴄᴇʟ", b"auto_upi_cancel")],
         ]
+        logger.info("AUTO_UPI_CHECK: verification result=not_found")
+        logger.info("AUTO_UPI_CHECK: editing result message state=not_found")
         await _edit_auto_upi_status_message(e, not_found_text, buttons=not_found_buttons)
         await e.answer("Payment not found yet.", alert=False)
 

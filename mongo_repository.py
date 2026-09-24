@@ -494,6 +494,12 @@ class MongoRepository:
             sort=[("created_at", DESCENDING)],
         )
 
+    def get_auto_upi_order(self, user_id, order_id):
+        """Return one Auto UPI order owned by the user."""
+        return self.db.upi_orders.find_one(
+            {"_id": str(order_id), "user_id": int(user_id)},
+        )
+
     def get_latest_auto_upi_order(self, user_id):
         """Return the user's newest Auto UPI order, regardless of status."""
         return self.db.upi_orders.find_one(

@@ -288,6 +288,40 @@ class AutoUpiVerificationTests(unittest.TestCase):
         self.assertEqual(callback_message.edit.await_args_list[1].args, (success_text,))
         self.assertIn("🤖 𝐀ᴜᴛᴏ 𝐕ᴇʀɪғɪᴇᴅ", success_text)
 
+    def test_check_status_resolves_callback_order_before_verification(self):
+        class CallbackBot:
+            def __init__(self):
+                self.handlers = []
+
+            def on(self, _pattern):
+                def decorator(handler):
+                    self.handlers.append(handler)
+                    return handler
+                return decorator
+
+        callback_bot = CallbackBot()
+        register_deposit(callback_bot)
+        callback = next(handler for handler in callback_bot.handlers if handler.__name__ == "cb_auto_upi_check")
+        order = pending_order(amount=10)
+        callback_message = SimpleNamespace(message="payment status", buttons=None, photo=None, id=1)
+        callback_message.edit = AsyncMock()
+        event = SimpleNamespace(
+            sender_id=7,
+            data=f"auto_upi_check:{order['order_id']}".encode(),
+            pattern_match=SimpleNamespace(group=lambda _index: order["order_id"].encode()),
+            message=callback_message,
+            answer=AsyncMock(),
+        )
+        pending_result = {"status": "pending", "credited": False}
+        with patch("plugins.deposit.repository.get_auto_upi_order", return_value=order) as get_order, \
+                patch("plugins.deposit.verify_pending_order", new=AsyncMock(return_value=pending_result)) as verify:
+            asyncio.run(callback(event))
+
+        get_order.assert_called_once_with(7, order["order_id"])
+        verify.assert_awaited_once_with(order, unittest.mock.ANY, notify=False)
+        self.assertEqual(callback_message.edit.await_args_list[0].args, ("⏳ 𝐂ʜᴇᴄᴋɪɴɢ ʏᴏᴜʀ 𝐏ᴀʏᴍᴇɴᴛ...",))
+        self.assertNotIn("no longer available", event.answer.await_args.args[0] if event.answer.await_args else "")
+
     def test_check_status_exception_replaces_checking_state(self):
         class CallbackBot:
             def __init__(self):
