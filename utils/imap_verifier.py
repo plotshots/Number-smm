@@ -237,12 +237,11 @@ def _sync_verify_auto_upi_order(order):
                 )
                 if outgoing_match or not received_match:
                     continue
-                purpose_match = re.search(
-                    rf"purpose\s*:\s*{re.escape(purpose)}(?![A-Za-z0-9])",
-                    clean_text,
-                    re.IGNORECASE,
-                )
+                purpose_match = re.search(r"purpose\s*:\s*([A-Za-z0-9-]+)", clean_text, re.IGNORECASE)
                 if not purpose_match:
+                    continue
+                received_purpose = purpose_match.group(1)
+                if received_purpose != purpose and received_purpose.replace("-", "").casefold() != purpose.replace("-", "").casefold():
                     continue
 
                 amount_match = re.search(

@@ -163,6 +163,10 @@ class MongoRuntimeTests(unittest.TestCase):
         self.assertEqual(completed["previous_balance"], 0)
         self.assertEqual(completed["balance"], 75)
         self.assertEqual(self.repository.get_user(505)["balance"], 75)
+        stored = self.repository.db.upi_orders.find_one({"_id": order["_id"]})
+        self.assertEqual(stored["verification_status"], "AUTO VERIFIED")
+        self.assertEqual(stored["previous_balance"], 0)
+        self.assertEqual(stored["balance"], 75)
 
     def test_auto_upi_expired_order_cannot_be_completed(self):
         from datetime import timedelta

@@ -106,6 +106,17 @@ def _keypad_message(amount):
     shown_amount = amount or "0"
     return f"{P_MONEY} <b>𝐄ɴᴛᴇʀ 𝐀ᴍᴏᴜɴᴛ</b>\n\n<blockquote>{P_INR}<code>{shown_amount}</code></blockquote>"
 
+def _build_auto_upi_uri(active_upi, order):
+    purpose = order["order_id"]
+    params = f"pa={active_upi}&" + urllib.parse.urlencode({
+        "pn": "Numbott",
+        "am": f"{order['payable_amount']:.2f}",
+        "cu": "INR",
+        "tn": purpose,
+        "tr": purpose,
+    })
+    return f"upi://pay?{params}"
+
 async def create_auto_upi_payment(event, amount):
     uid = event.sender_id
     amount = int(amount)
@@ -113,14 +124,8 @@ async def create_auto_upi_payment(event, amount):
     expires_at = repository._now() + timedelta(seconds=AUTO_CANCEL_SECONDS)
     order = repository.create_auto_upi_order(uid, amount, amount, purpose, expires_at)
 
-    active_upi = AUTO_UPI_ID
-    params = f"pa={active_upi}&" + urllib.parse.urlencode({
-        "pn": "Numbott",
-        "am": f"{order['payable_amount']:.2f}",
-        "cu": "INR",
-        "tn": purpose,
-    })
-    upi_url = f"upi://pay?{params}"
+    upi_url = _build_auto_upi_uri(AUTO_UPI_ID, order)
+    logger.info("AUTO_UPI: generated UPI URI=%s", upi_url)
     try:
         import qrcode
         qr = qrcode.QRCode(version=1, box_size=10, border=4)
@@ -162,6 +167,14 @@ def register_deposit(bot):
 
     @bot.on(events.CallbackQuery(pattern=b"^auto_upi_check$"))
     async def cb_auto_upi_check(e):
+        checking_text = "⏳ Checking your payment"
+        try:
+            if e.message.message != checking_text:
+                await e.edit(checking_text)
+        except MessageNotModifiedError:
+            pass
+        except Exception:
+            logger.exception("AUTO_UPI_CHECK: status message update failed user_id=%s", e.sender_id)
         logger.info("AUTO_UPI_CHECK: callback received user_id=%s", e.sender_id)
         pending_order = repository.get_current_pending_auto_upi_order(e.sender_id)
         logger.info(

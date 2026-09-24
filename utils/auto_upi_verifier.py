@@ -20,18 +20,20 @@ def _is_expired(order):
 
 def payment_not_found_text():
     return (
-        "⏳ <b>Payment Not Found Yet</b>\n\n"
-        "We couldn't detect your payment yet.\n"
-        "If you have already paid, please wait a little and try again."
+        "❌ **❌ 𝐏ᴀʏᴍᴇɴᴛ 𝐍ᴏᴛ 𝐅ᴏᴜɴᴅ!**\n"
+        "🔑 𝐍ᴏ ʀᴇᴄᴇɴᴛ 𝐩ᴀʏᴍᴇɴᴛ ᴡᴀs ғᴏᴜɴᴅ.\n"
+        "• 𝐈ғ ʏᴏᴜ ᴊᴜsᴛ ᴘᴀɪᴅ, ᴘʟᴇᴀsᴇ ᴡᴀɪᴛ **1-2 ᴍɪɴᴜᴛᴇs** ᴀɴᴅ ᴛʀʏ 𝐚ɢᴀɪɴ.\n"
+        "• 𝐎ʀ ᴜsᴇ **✍️ 𝐌ᴀɴᴜᴀʟ 𝐔𝐏𝐈** ᴛᴏ ᴜᴘʟᴏᴀᴅ ʏᴏᴜʀ 𝐩ᴀʏᴍᴇɴᴛ sᴄʀᴇᴇɴsʜᴏᴛ."
     )
 
 
 def payment_success_text(amount, previous_balance, new_balance):
     return (
-        "✅ <b>🎉 𝐃ᴇᴘᴏsɪᴛ 𝐀ᴘᴘʀᴏᴠᴇᴅ!</b>\n\n"
-        f"💰 <b>𝐀ᴍᴏᴜɴᴛ 𝐀ᴅᴅᴇᴅ:</b> <b>₹{amount}</b>\n"
-        f"📉 <b>𝐏ʀᴇᴠɪᴏᴜs 𝐁ᴀʟᴀɴᴄᴇ:</b> ₹{previous_balance}\n"
-        f"📈 <b>𝐍ᴇᴡ 𝐁ᴀʟᴀɴᴄᴇ:</b> <b>₹{new_balance}</b>"
+        "✅ 🎉 𝐃ᴇᴘᴏsɪᴛ 𝐀ᴘᴘʀᴏᴠᴇᴅ!\n\n"
+        "🤖 𝐀ᴜᴛᴏ 𝐕ᴇʀɪғɪᴇᴅ\n\n"
+        f"💰 𝐀ᴍᴏᴜɴᴛ 𝐀ᴅᴅᴇᴅ: ₹{amount}\n"
+        f"📉 𝐏ʀᴇᴠɪᴏᴜs 𝐁ᴀʟᴀɴᴄᴇ: ₹{previous_balance}\n"
+        f"📈 𝐍ᴇᴡ 𝐁ᴀʟᴀɴᴄᴇ: ₹{new_balance}"
     )
 
 
@@ -116,6 +118,23 @@ async def verify_pending_order(order, telegram_bot=bot, notify=True):
 async def verify_current_user_order(user_id, telegram_bot=bot, notify=True):
     order = repository.get_current_pending_auto_upi_order(user_id)
     if not order:
+        order = repository.get_latest_auto_upi_order(user_id)
+        if order and order.get("status") == "paid":
+            return {
+                "status": "paid",
+                "credited": False,
+                "already_processed": True,
+                "result": {
+                    "amount": order.get("payable_amount", order.get("amount")),
+                    "previous_balance": order.get("previous_balance"),
+                    "balance": order.get("balance"),
+                    "user_id": order.get("user_id"),
+                    "order_id": order.get("order_id"),
+                },
+                "order": order,
+            }
+        if order and order.get("status") == "expired":
+            return {"status": "expired", "credited": False, "order": order}
         return {"status": None, "credited": False, "reason": "no_pending_order"}
     result = await verify_pending_order(order, telegram_bot, notify=notify)
     result["order"] = order

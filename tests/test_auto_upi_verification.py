@@ -1,5 +1,6 @@
 import asyncio
 import os
+import urllib.parse
 import unittest
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
@@ -16,9 +17,9 @@ os.environ.setdefault("MONGODB_URI", "mongodb://localhost:27017")
 
 from mongo_repository import MongoRepository
 from utils import auto_upi_verifier
-from utils.auto_upi_verifier import payment_not_found_text
+from utils.auto_upi_verifier import payment_not_found_text, payment_success_text
 from utils.imap_verifier import verify_auto_upi_order
-from plugins.deposit import register_deposit
+from plugins.deposit import _build_auto_upi_uri, register_deposit
 
 
 class FakeImap:
@@ -88,6 +89,33 @@ class AutoUpiVerificationTests(unittest.TestCase):
         self.assertEqual(result[0], True)
         self.assertEqual(result[1]["purpose"], order["purpose"])
         self.assertEqual(result[1]["amount"], order["payable_amount"])
+
+    def test_matches_fampay_normalized_purpose_without_hyphens(self):
+        order = pending_order(purpose="ORD-20260924-CD937E82")
+        result = self.verify_email(
+            order,
+            payment_email("ORD20260924CD937E82", order["payable_amount"], datetime.now(timezone.utc)),
+        )
+        self.assertEqual(result[0], True)
+        self.assertEqual(result[1]["purpose"], order["purpose"])
+
+    def test_rejects_different_order_id_after_normalization(self):
+        order = pending_order(purpose="ORD-20260924-CD937E82")
+        result = self.verify_email(
+            order,
+            payment_email("ORD-20260924-CD937E83", order["payable_amount"], datetime.now(timezone.utc)),
+        )
+        self.assertEqual(result[0], False)
+
+    def test_qr_uri_preserves_order_id_in_tn_and_tr(self):
+        order_id = "ORD-20260924-CD937E82"
+        uri = _build_auto_upi_uri("merchant@upi", {
+            "order_id": order_id,
+            "payable_amount": 100,
+        })
+        decoded = urllib.parse.parse_qs(urllib.parse.urlsplit(uri).query)
+        self.assertEqual(decoded["tn"], [order_id])
+        self.assertEqual(decoded["tr"], [order_id])
 
     def test_rejects_wrong_amount_and_wrong_purpose(self):
         order = pending_order()
@@ -178,8 +206,111 @@ class AutoUpiVerificationTests(unittest.TestCase):
             asyncio.run(callback(event))
 
         self.assertEqual(verify.await_count, 2)
-        event.edit.assert_not_awaited()
+        self.assertEqual(event.edit.await_count, 2)
+        self.assertEqual(event.edit.await_args_list[0].args, ("⏳ Checking your payment",))
+        self.assertEqual(event.edit.await_args_list[1].args, ("⏳ Checking your payment",))
         self.assertEqual(event.answer.await_count, 2)
+
+    def test_check_status_edits_checking_then_auto_verified_success(self):
+        class CallbackBot:
+            def __init__(self):
+                self.handlers = []
+
+            def on(self, _pattern):
+                def decorator(handler):
+                    self.handlers.append(handler)
+                    return handler
+                return decorator
+
+        callback_bot = CallbackBot()
+        register_deposit(callback_bot)
+        callback = next(handler for handler in callback_bot.handlers if handler.__name__ == "cb_auto_upi_check")
+        success_result = {
+            "status": "paid",
+            "credited": True,
+            "result": {"amount": 100, "previous_balance": 25, "balance": 125},
+        }
+        event = SimpleNamespace(
+            sender_id=7,
+            message=SimpleNamespace(message="payment QR"),
+            edit=AsyncMock(),
+            answer=AsyncMock(),
+        )
+        with patch("plugins.deposit.repository.get_current_pending_auto_upi_order", return_value=pending_order()), \
+                patch("plugins.deposit.verify_current_user_order", new=AsyncMock(return_value=success_result)) as verify:
+            asyncio.run(callback(event))
+
+        verify.assert_awaited_once()
+        success_text = payment_success_text(100, 25, 125)
+        self.assertEqual(event.edit.await_args_list[0].args, ("⏳ Checking your payment",))
+        self.assertEqual(event.edit.await_args_list[1].args, (success_text,))
+        self.assertIn("🤖 𝐀ᴜᴛᴏ 𝐕ᴇʀɪғɪᴇᴅ", success_text)
+
+    def test_check_status_exception_replaces_checking_state(self):
+        class CallbackBot:
+            def __init__(self):
+                self.handlers = []
+
+            def on(self, _pattern):
+                def decorator(handler):
+                    self.handlers.append(handler)
+                    return handler
+                return decorator
+
+        callback_bot = CallbackBot()
+        register_deposit(callback_bot)
+        callback = next(handler for handler in callback_bot.handlers if handler.__name__ == "cb_auto_upi_check")
+        event = SimpleNamespace(
+            sender_id=7,
+            message=SimpleNamespace(message="payment QR"),
+            edit=AsyncMock(),
+            answer=AsyncMock(),
+        )
+        with patch("plugins.deposit.repository.get_current_pending_auto_upi_order", return_value=pending_order()), \
+                patch("plugins.deposit.verify_current_user_order", new=AsyncMock(side_effect=RuntimeError("imap unavailable"))):
+            asyncio.run(callback(event))
+
+        self.assertEqual(event.edit.await_args_list[0].args, ("⏳ Checking your payment",))
+        self.assertIn("temporarily unavailable", event.edit.await_args_list[1].args[0])
+
+    def test_paid_order_status_lookup_does_not_credit_again(self):
+        paid_order = pending_order()
+        paid_order.update({
+            "status": "paid",
+            "payable_amount": 100,
+            "previous_balance": 25,
+            "balance": 125,
+            "verification_status": "AUTO VERIFIED",
+        })
+
+        async def exercise():
+            with patch.object(auto_upi_verifier, "repository") as repository_mock:
+                repository_mock.get_current_pending_auto_upi_order.return_value = None
+                repository_mock.get_latest_auto_upi_order.return_value = paid_order
+                return await auto_upi_verifier.verify_current_user_order(7, notify=False)
+
+        result = asyncio.run(exercise())
+        self.assertEqual(result["status"], "paid")
+        self.assertFalse(result["credited"])
+        self.assertTrue(result["already_processed"])
+        self.assertEqual(result["result"]["balance"], 125)
+
+    def test_background_notification_uses_auto_verified_success_text(self):
+        telegram_bot = SimpleNamespace(send_message=AsyncMock())
+        order = pending_order()
+        result = {
+            "user_id": 7,
+            "amount": 100,
+            "previous_balance": 25,
+            "balance": 125,
+        }
+        with patch("plugins.deposit.process_referral_bonus", new=AsyncMock()):
+            asyncio.run(auto_upi_verifier._notify_paid(order, result, telegram_bot))
+
+        telegram_bot.send_message.assert_awaited_once_with(
+            7, payment_success_text(100, 25, 125),
+        )
+        self.assertIn("🤖 𝐀ᴜᴛᴏ 𝐕ᴇʀɪғɪᴇᴅ", telegram_bot.send_message.await_args.args[1])
 
 
 if __name__ == "__main__":
