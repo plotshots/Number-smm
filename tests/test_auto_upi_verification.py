@@ -20,6 +20,8 @@ from utils import auto_upi_verifier
 from utils.auto_upi_verifier import payment_not_found_text, payment_success_text
 from utils.imap_verifier import verify_auto_upi_order
 from plugins.deposit import (
+    AUTO_UPI_CHECKING_TEXT,
+    AUTO_UPI_VERIFICATION_TIMEOUT_SECONDS,
     _build_auto_upi_uri,
     _edit_auto_upi_status_message,
     generate_auto_upi_order_id,
@@ -253,7 +255,7 @@ class AutoUpiVerificationTests(unittest.TestCase):
         self.assertEqual(callback_message.edit.await_count, 4)
         self.assertEqual(
             [call.args[0] for call in callback_message.edit.await_args_list],
-            ["⏳ Checking your payment", payment_not_found_text(), "⏳ Checking your payment", payment_not_found_text()],
+            [AUTO_UPI_CHECKING_TEXT, payment_not_found_text(), AUTO_UPI_CHECKING_TEXT, payment_not_found_text()],
         )
         self.assertEqual(event.answer.await_count, 2)
 
@@ -284,7 +286,7 @@ class AutoUpiVerificationTests(unittest.TestCase):
 
         verify.assert_awaited_once()
         success_text = payment_success_text(100, 25, 125)
-        self.assertEqual(callback_message.edit.await_args_list[0].args, ("⏳ Checking your payment",))
+        self.assertEqual(callback_message.edit.await_args_list[0].args, (AUTO_UPI_CHECKING_TEXT,))
         self.assertEqual(callback_message.edit.await_args_list[1].args, (success_text,))
         self.assertIn("🤖 𝐀ᴜᴛᴏ 𝐕ᴇʀɪғɪᴇᴅ", success_text)
 
@@ -320,7 +322,7 @@ class AutoUpiVerificationTests(unittest.TestCase):
         get_order.assert_called_once_with(7, order["order_id"])
         verify.assert_awaited_once_with(order, unittest.mock.ANY, notify=False)
         self.assertEqual(callback_message.edit.await_args_list[0].args, ("⏳ 𝐂ʜᴇᴄᴋɪɴɢ ʏᴏᴜʀ 𝐏ᴀʏᴍᴇɴᴛ...",))
-        self.assertNotIn("no longer available", event.answer.await_args.args[0] if event.answer.await_args else "")
+        event.answer.assert_awaited_once_with()
 
     def test_check_status_exception_replaces_checking_state(self):
         class CallbackBot:
@@ -342,8 +344,37 @@ class AutoUpiVerificationTests(unittest.TestCase):
                 patch("plugins.deposit.verify_current_user_order", new=AsyncMock(side_effect=RuntimeError("imap unavailable"))):
             asyncio.run(callback(event))
 
-        self.assertEqual(callback_message.edit.await_args_list[0].args, ("⏳ Checking your payment",))
+        self.assertEqual(callback_message.edit.await_args_list[0].args, (AUTO_UPI_CHECKING_TEXT,))
         self.assertIn("temporarily unavailable", callback_message.edit.await_args_list[1].args[0])
+
+    def test_check_status_timeout_replaces_checking_state(self):
+        class CallbackBot:
+            def __init__(self):
+                self.handlers = []
+
+            def on(self, _pattern):
+                def decorator(handler):
+                    self.handlers.append(handler)
+                    return handler
+                return decorator
+
+        callback_bot = CallbackBot()
+        register_deposit(callback_bot)
+        callback = next(handler for handler in callback_bot.handlers if handler.__name__ == "cb_auto_upi_check")
+        callback_message = SimpleNamespace(message="payment status", buttons=None, photo=None, id=1, edit=AsyncMock())
+        event = SimpleNamespace(sender_id=7, message=callback_message, answer=AsyncMock())
+
+        async def slow_verification(*_args, **_kwargs):
+            await asyncio.sleep(1)
+
+        with patch("plugins.deposit.repository.get_current_pending_auto_upi_order", return_value=pending_order()), \
+                patch("plugins.deposit.verify_current_user_order", new=slow_verification), \
+                patch("plugins.deposit.AUTO_UPI_VERIFICATION_TIMEOUT_SECONDS", 0.01):
+            asyncio.run(callback(event))
+
+        event.answer.assert_awaited_once_with()
+        self.assertEqual(callback_message.edit.await_args_list[0].args, (AUTO_UPI_CHECKING_TEXT,))
+        self.assertIn("timed out", callback_message.edit.await_args_list[1].args[0])
 
     def test_status_edit_uses_photo_caption_target_when_callback_message_is_media(self):
         callback_message = SimpleNamespace(
@@ -373,7 +404,7 @@ class AutoUpiVerificationTests(unittest.TestCase):
             result = asyncio.run(_edit_auto_upi_status_message(callback, "Updated status"))
 
         self.assertFalse(result)
-        callback.answer.assert_awaited_once()
+        callback.answer.assert_not_awaited()
         log_exception.assert_called()
 
     def test_paid_order_status_lookup_does_not_credit_again(self):

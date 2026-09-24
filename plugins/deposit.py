@@ -4,6 +4,7 @@ import html
 import urllib.parse
 import io
 import uuid
+import asyncio
 from datetime import datetime, timedelta, timezone
 from telethon import events, Button
 from telethon.errors import MessageNotModifiedError
@@ -19,6 +20,9 @@ from utils.auto_upi_verifier import (
     verify_pending_order,
     verify_current_user_order,
 )
+
+AUTO_UPI_VERIFICATION_TIMEOUT_SECONDS = 45
+AUTO_UPI_CHECKING_TEXT = "⏳ 𝐂ʜᴇᴄᴋɪɴɢ ʏᴏᴜʀ 𝐏ᴀʏᴍᴇɴᴛ..."
 
 async def deposit_menu(event):
     btns = [
@@ -104,20 +108,32 @@ async def _edit_auto_upi_status_message(callback_query, text, buttons=None):
     target_message = getattr(callback_query, "message", None)
     if target_message is None:
         logger.error(
-            "AUTO_UPI_CHECK: callback has no target message user_id=%s",
-            callback_query.sender_id,
+            "[AUTO_UPI_CHECK] callback has no target message user_id=%s",
+            getattr(callback_query, "sender_id", None),
         )
         return False
 
     is_photo_message = getattr(target_message, "photo", None) is not None
+    message_type = "photo" if is_photo_message else "text"
+    logger.info(
+        "[AUTO_UPI_CHECK] target message message_id=%s chat_id=%s message_type=%s",
+        getattr(target_message, "id", None),
+        getattr(target_message, "chat_id", getattr(callback_query, "chat_id", None)),
+        message_type,
+    )
     current_text = getattr(target_message, "message", None)
     if current_text == text and _auto_upi_button_signature(getattr(target_message, "buttons", None)) == _auto_upi_button_signature(buttons):
         return False
 
+    edit_kind = "caption" if is_photo_message else "text"
+    logger.info("[AUTO_UPI_CHECK] editing %s status message", edit_kind)
     try:
-        edit_kind = "caption" if is_photo_message else "text"
-        logger.debug("AUTO_UPI_CHECK: editing %s status message id=%s", edit_kind, getattr(target_message, "id", None))
-        await target_message.edit(text, buttons=buttons)
+        if is_photo_message and hasattr(target_message, "edit_caption"):
+            await target_message.edit_caption(text, buttons=buttons)
+        elif not is_photo_message and hasattr(target_message, "edit_text"):
+            await target_message.edit_text(text, buttons=buttons)
+        else:
+            await target_message.edit(text, buttons=buttons)
         return True
     except MessageNotModifiedError:
         current_text = getattr(target_message, "message", None)
@@ -125,23 +141,15 @@ async def _edit_auto_upi_status_message(callback_query, text, buttons=None):
         requested_buttons = _auto_upi_button_signature(buttons)
         if current_text == text and current_buttons == requested_buttons:
             return False
-        logger.exception("AUTO_UPI_CHECK: Telegram reported an unexpected unchanged-message response")
-        try:
-            await callback_query.answer("Payment status message could not be updated.", alert=True)
-        except Exception:
-            logger.exception("AUTO_UPI_CHECK: failed to answer unchanged-message edit failure user_id=%s", callback_query.sender_id)
+        logger.exception("[AUTO_UPI_CHECK] unexpected MessageNotModifiedError while editing")
         return False
     except Exception:
         logger.exception(
-            "AUTO_UPI_CHECK: failed to edit %s status message user_id=%s message_id=%s",
+            "[AUTO_UPI_CHECK] %s message edit failed: user_id=%s message_id=%s",
             edit_kind,
-            callback_query.sender_id,
+            getattr(callback_query, "sender_id", None),
             getattr(target_message, "id", None),
         )
-        try:
-            await callback_query.answer("Payment status message is no longer editable.", alert=True)
-        except Exception:
-            logger.exception("AUTO_UPI_CHECK: failed to answer edit failure user_id=%s", callback_query.sender_id)
         return False
 
 # We will skip the automated UPI part in this script to save space if needed, 
@@ -185,7 +193,7 @@ async def create_auto_upi_payment(event, amount):
     order = repository.create_auto_upi_order(uid, amount, amount, purpose, expires_at)
 
     upi_url = _build_auto_upi_uri(AUTO_UPI_ID, order)
-    logger.info("AUTO_UPI: generated UPI URI=%s", upi_url)
+    logger.info("AUTO_UPI: generated payment URI order_id=%s", order["order_id"])
     try:
         import qrcode
         qr = qrcode.QRCode(version=1, box_size=10, border=4)
@@ -236,86 +244,100 @@ def register_deposit(bot):
         order_id = pattern_match.group(1) if pattern_match else None
         if isinstance(order_id, bytes):
             order_id = order_id.decode()
-        logger.info("AUTO_UPI_CHECK: callback received user_id=%s", e.sender_id)
-        logger.info(
-            "AUTO_UPI_CHECK: callback_data parsed=%s",
-            callback_data,
-        )
-        if order_id:
-            order = repository.get_auto_upi_order(e.sender_id, order_id)
-        else:
-            order = repository.get_current_pending_auto_upi_order(e.sender_id)
+        if not order_id and callback_data.startswith("auto_upi_check:"):
+            order_id = callback_data.partition(":")[2] or None
+
+        logger.info("[AUTO_UPI_CHECK] callback received user_id=%s", e.sender_id)
+        logger.info("[AUTO_UPI_CHECK] callback_data=%s", callback_data)
+        logger.info("[AUTO_UPI_CHECK] order_id=%s", order_id)
+        try:
+            await e.answer()
+        except Exception:
+            logger.exception("[AUTO_UPI_CHECK] callback answer failed")
+
+        checking_text = AUTO_UPI_CHECKING_TEXT
+        logger.info("[AUTO_UPI_CHECK] setting checking state")
+        checking_shown = await _edit_auto_upi_status_message(e, checking_text)
+        if not checking_shown:
+            logger.error("[AUTO_UPI_CHECK] checking state was not shown")
+
+        order = repository.get_auto_upi_order(e.sender_id, order_id) if order_id else repository.get_current_pending_auto_upi_order(e.sender_id)
         pending_order = order if order and order.get("status") == "pending" else None
-        logger.info(
-            "AUTO_UPI_CHECK: order_id resolved=%s",
-            order.get("order_id") if order else order_id,
-        )
-        logger.info(
-            "AUTO_UPI_CHECK: Mongo order %s order_id=%s",
-            "found" if order else "missing",
-            order.get("order_id") if order else order_id,
-        )
+        resolved_order_id = order.get("order_id") if order else order_id
+        logger.info("[AUTO_UPI_CHECK] order found=%s order_id=%s", bool(order), resolved_order_id)
+        logger.info("[AUTO_UPI_CHECK] order status=%s", order.get("status") if order else None)
+
         if not pending_order:
             if order and order.get("status") == "expired":
+                logger.info("[AUTO_UPI_CHECK] setting final result=expired")
                 await _edit_auto_upi_status_message(e, payment_expired_text())
+            elif order and order.get("status") == "paid":
+                success_text = payment_success_text(
+                    order.get("payable_amount", order.get("amount")),
+                    order.get("previous_balance"),
+                    order.get("balance"),
+                )
+                logger.info("[AUTO_UPI_CHECK] setting final result=already_completed")
+                await _edit_auto_upi_status_message(e, success_text)
             else:
-                await e.answer("This payment session has expired or was already processed.", alert=True)
+                logger.info("[AUTO_UPI_CHECK] setting final result=not_found")
+                await _edit_auto_upi_status_message(e, payment_not_found_text())
+            logger.info("[AUTO_UPI_CHECK] callback completed")
             return
 
-        checking_text = (
-            "⏳ 𝐂ʜᴇᴄᴋɪɴɢ ʏᴏᴜʀ 𝐏ᴀʏᴍᴇɴᴛ..."
-            if order_id else "⏳ Checking your payment"
-        )
-        logger.info("AUTO_UPI_CHECK: editing result message state=checking")
-        await _edit_auto_upi_status_message(e, checking_text)
-        logger.info("AUTO_UPI_CHECK: starting payment verification")
+        logger.info("[AUTO_UPI_CHECK] verification started order_id=%s", resolved_order_id)
         try:
-            if order_id:
-                result = await verify_pending_order(pending_order, bot, notify=False)
-            else:
-                result = await verify_current_user_order(e.sender_id, bot, notify=False)
-        except Exception:
-            logger.exception(
-                "AUTO_UPI_CHECK: verification failed order_id=%s",
-                pending_order.get("order_id") if pending_order else None,
+            verification = (
+                verify_pending_order(pending_order, bot, notify=False)
+                if order_id
+                else verify_current_user_order(e.sender_id, bot, notify=False)
             )
-            error_text = "⚠️ <b>Payment verification is temporarily unavailable.</b>\nPlease try again shortly."
-            await _edit_auto_upi_status_message(e, error_text)
+            result = await asyncio.wait_for(
+                verification,
+                timeout=AUTO_UPI_VERIFICATION_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logger.error("[AUTO_UPI_CHECK] verification timeout order_id=%s", resolved_order_id)
+            await _edit_auto_upi_status_message(
+                e,
+                "⚠️ <b>Payment verification timed out.</b>\nPlease try again shortly.",
+            )
+            logger.info("[AUTO_UPI_CHECK] callback completed")
+            return
+        except Exception:
+            logger.exception("[AUTO_UPI_CHECK] verification exception order_id=%s", resolved_order_id)
+            await _edit_auto_upi_status_message(
+                e,
+                "⚠️ <b>Payment verification is temporarily unavailable.</b>\nPlease try again shortly.",
+            )
+            logger.info("[AUTO_UPI_CHECK] callback completed")
             return
 
-        if result.get("status") == "paid":
-            logger.info("AUTO_UPI_CHECK: payment found")
-        elif result.get("status") in (None, "pending", "expired"):
-            logger.info("AUTO_UPI_CHECK: payment not found")
-        logger.info("AUTO_UPI_CHECK: verification finished")
-        if result.get("status") is None:
-            return await e.answer("This payment session has expired or was already processed.", alert=True)
-        if result.get("status") == "paid":
-            payment = result["result"]
-            success_text = payment_success_text(
-                payment["amount"], payment["previous_balance"], payment["balance"],
+        status = result.get("status")
+        logger.info("[AUTO_UPI_CHECK] verification result=%s", status)
+        if status == "paid":
+            payment = result.get("result") or {}
+            final_text = payment_success_text(
+                payment.get("amount", pending_order.get("payable_amount")),
+                payment.get("previous_balance"),
+                payment.get("balance"),
             )
-            logger.info("AUTO_UPI_CHECK: editing result message state=paid")
-            await _edit_auto_upi_status_message(e, success_text)
-            return
-        if result.get("status") == "expired":
-            expired_text = payment_expired_text()
-            logger.info("AUTO_UPI_CHECK: editing result message state=expired")
-            await _edit_auto_upi_status_message(e, expired_text)
-            return
-        not_found_text = payment_not_found_text()
-        resolved_order_id = pending_order.get("order_id")
-        not_found_buttons = [
-            [Button.inline(
-                "✅ 𝐂ʜᴇᴄᴋ 𝐏ᴀʏᴍᴇɴᴛ 𝐒ᴛᴀᴛᴜs",
-                f"auto_upi_check:{resolved_order_id}".encode(),
-            )],
-            [Button.inline("❌ 𝐂ᴀɴᴄᴇʟ", b"auto_upi_cancel")],
-        ]
-        logger.info("AUTO_UPI_CHECK: verification result=not_found")
-        logger.info("AUTO_UPI_CHECK: editing result message state=not_found")
-        await _edit_auto_upi_status_message(e, not_found_text, buttons=not_found_buttons)
-        await e.answer("Payment not found yet.", alert=False)
+            logger.info("[AUTO_UPI_CHECK] setting final result=paid")
+            await _edit_auto_upi_status_message(e, final_text)
+        elif status == "expired":
+            logger.info("[AUTO_UPI_CHECK] setting final result=expired")
+            await _edit_auto_upi_status_message(e, payment_expired_text())
+        else:
+            not_found_buttons = [
+                [Button.inline(
+                    "✅ 𝐂ʜᴇᴄᴋ 𝐏ᴀʏᴍᴇɴᴛ 𝐒ᴛᴀᴛᴜs",
+                    f"auto_upi_check:{resolved_order_id}".encode(),
+                )],
+                [Button.inline("❌ 𝐂ᴀɴᴄᴇʟ", b"auto_upi_cancel")],
+            ]
+            logger.info("[AUTO_UPI_CHECK] setting final result=not_found")
+            await _edit_auto_upi_status_message(e, payment_not_found_text(), buttons=not_found_buttons)
+        logger.info("[AUTO_UPI_CHECK] callback completed")
 
     @bot.on(events.CallbackQuery(pattern=b"^auto_upi_cancel$"))
     async def cb_auto_upi_cancel(e):
