@@ -68,7 +68,21 @@ async def verify_pending_order(order, telegram_bot=bot, notify=True):
             "AUTO_UPI: already completed / duplicate prevented order_id=%s",
             order.get("order_id") if order else None,
         )
-        return {"status": order.get("status") if order else None, "credited": False}
+        result = None
+        if order and order.get("status") == "paid":
+            result = {
+                "amount": order.get("payable_amount", order.get("amount")),
+                "previous_balance": order.get("previous_balance"),
+                "balance": order.get("balance"),
+                "user_id": order.get("user_id"),
+                "order_id": order.get("order_id"),
+            }
+        return {
+            "status": order.get("status") if order else None,
+            "credited": False,
+            "already_processed": True,
+            "result": result,
+        }
 
     logger.info("AUTO_UPI: verification started order_id=%s", order.get("order_id"))
     logger.info("AUTO_UPI: order identified order_id=%s", order.get("order_id"))
@@ -113,32 +127,6 @@ async def verify_pending_order(order, telegram_bot=bot, notify=True):
         "already_processed": True,
         "result": result,
     }
-
-
-async def verify_current_user_order(user_id, telegram_bot=bot, notify=True):
-    order = repository.get_current_pending_auto_upi_order(user_id)
-    if not order:
-        order = repository.get_latest_auto_upi_order(user_id)
-        if order and order.get("status") == "paid":
-            return {
-                "status": "paid",
-                "credited": False,
-                "already_processed": True,
-                "result": {
-                    "amount": order.get("payable_amount", order.get("amount")),
-                    "previous_balance": order.get("previous_balance"),
-                    "balance": order.get("balance"),
-                    "user_id": order.get("user_id"),
-                    "order_id": order.get("order_id"),
-                },
-                "order": order,
-            }
-        if order and order.get("status") == "expired":
-            return {"status": "expired", "credited": False, "order": order}
-        return {"status": None, "credited": False, "reason": "no_pending_order"}
-    result = await verify_pending_order(order, telegram_bot, notify=notify)
-    result["order"] = order
-    return result
 
 
 async def _verification_loop(telegram_bot):

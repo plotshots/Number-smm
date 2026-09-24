@@ -167,7 +167,7 @@ class AutoUpiVerificationTests(unittest.TestCase):
 
     def test_rejects_old_email_and_expired_order(self):
         order = pending_order()
-        old_email = payment_email(order["purpose"], 100, order["created_at"] - timedelta(seconds=1))
+        old_email = payment_email(order["purpose"], 100, order["created_at"] - timedelta(seconds=10))
         expired_order = pending_order(expires_at=datetime.now(timezone.utc) - timedelta(seconds=1))
         self.assertEqual(self.verify_email(order, old_email)[0], False)
         self.assertEqual(self.verify_email(expired_order, old_email)[1], "Payment order has expired.")
@@ -247,7 +247,7 @@ class AutoUpiVerificationTests(unittest.TestCase):
         )
         pending_result = {"status": "pending", "credited": False}
         with patch("plugins.deposit.repository.get_current_pending_auto_upi_order", return_value=pending_order()), \
-                patch("plugins.deposit.verify_current_user_order", new=AsyncMock(return_value=pending_result)) as verify:
+            patch("plugins.deposit.verify_pending_order", new=AsyncMock(return_value=pending_result)) as verify:
             asyncio.run(callback(event))
             asyncio.run(callback(event))
 
@@ -281,7 +281,7 @@ class AutoUpiVerificationTests(unittest.TestCase):
         callback_message = SimpleNamespace(message="payment status", buttons=None, photo=None, id=1, edit=AsyncMock())
         event = SimpleNamespace(sender_id=7, message=callback_message, answer=AsyncMock())
         with patch("plugins.deposit.repository.get_current_pending_auto_upi_order", return_value=pending_order()), \
-                patch("plugins.deposit.verify_current_user_order", new=AsyncMock(return_value=success_result)) as verify:
+            patch("plugins.deposit.verify_pending_order", new=AsyncMock(return_value=success_result)) as verify:
             asyncio.run(callback(event))
 
         verify.assert_awaited_once()
@@ -341,7 +341,7 @@ class AutoUpiVerificationTests(unittest.TestCase):
         callback_message = SimpleNamespace(message="payment status", buttons=None, photo=None, id=1, edit=AsyncMock())
         event = SimpleNamespace(sender_id=7, message=callback_message, answer=AsyncMock())
         with patch("plugins.deposit.repository.get_current_pending_auto_upi_order", return_value=pending_order()), \
-                patch("plugins.deposit.verify_current_user_order", new=AsyncMock(side_effect=RuntimeError("imap unavailable"))):
+            patch("plugins.deposit.verify_pending_order", new=AsyncMock(side_effect=RuntimeError("imap unavailable"))):
             asyncio.run(callback(event))
 
         self.assertEqual(callback_message.edit.await_args_list[0].args, (AUTO_UPI_CHECKING_TEXT,))
@@ -368,7 +368,7 @@ class AutoUpiVerificationTests(unittest.TestCase):
             await asyncio.sleep(1)
 
         with patch("plugins.deposit.repository.get_current_pending_auto_upi_order", return_value=pending_order()), \
-                patch("plugins.deposit.verify_current_user_order", new=slow_verification), \
+                patch("plugins.deposit.verify_pending_order", new=slow_verification), \
                 patch("plugins.deposit.AUTO_UPI_VERIFICATION_TIMEOUT_SECONDS", 0.01):
             asyncio.run(callback(event))
 
@@ -421,7 +421,7 @@ class AutoUpiVerificationTests(unittest.TestCase):
             with patch.object(auto_upi_verifier, "repository") as repository_mock:
                 repository_mock.get_current_pending_auto_upi_order.return_value = None
                 repository_mock.get_latest_auto_upi_order.return_value = paid_order
-                return await auto_upi_verifier.verify_current_user_order(7, notify=False)
+                return await auto_upi_verifier.verify_pending_order(paid_order, notify=False)
 
         result = asyncio.run(exercise())
         self.assertEqual(result["status"], "paid")
@@ -445,6 +445,63 @@ class AutoUpiVerificationTests(unittest.TestCase):
             7, payment_success_text(100, 25, 125),
         )
         self.assertIn("🤖 𝐀ᴜᴛᴏ 𝐕ᴇʀɪғɪᴇᴅ", telegram_bot.send_message.await_args.args[1])
+
+    def test_real_check_callback_reaches_payment_not_found(self):
+        callback_bot = SimpleNamespace(handlers=[])
+        callback_bot.on = lambda _pattern: lambda handler: callback_bot.handlers.append(handler) or handler
+        register_deposit(callback_bot)
+        callback = next(handler for handler in callback_bot.handlers if handler.__name__ == "cb_auto_upi_check")
+        repository = MongoRepository(client=mongomock.MongoClient(), database_name="auto_upi_callback_pending")
+        repository.ensure_indexes()
+        repository.ensure_user(7)
+        order = repository.create_auto_upi_order(7, 10, 10, "ORD20260924CALLBACK1", repository._now() + timedelta(minutes=5))
+        message = SimpleNamespace(message="payment", buttons=None, photo=None, edit=AsyncMock())
+        event = SimpleNamespace(
+            sender_id=7,
+            data=f"auto_upi_check:{order['order_id']}".encode(),
+            pattern_match=SimpleNamespace(group=lambda _index: order["order_id"].encode()),
+            message=message,
+            answer=AsyncMock(),
+        )
+        FakeImap.raw_messages = []
+        with patch.object(auto_upi_verifier, "repository", repository), \
+                patch("plugins.deposit.repository", repository), \
+                patch("utils.imap_verifier.get_imap_credentials", return_value=("test@example.com", "test-password")), \
+                patch("utils.imap_verifier.imaplib.IMAP4_SSL", FakeImap):
+            asyncio.run(callback(event))
+        self.assertEqual(message.edit.await_args_list[0].args, (AUTO_UPI_CHECKING_TEXT,))
+        self.assertIn("𝐏ᴀʏᴍᴇɴᴛ 𝐍ᴏᴛ 𝐅ᴏᴜɴᴅ", message.edit.await_args_list[-1].args[0])
+        self.assertEqual(repository.get_user(7)["balance"], 0)
+
+    def test_real_check_callback_credits_matching_payment_once(self):
+        callback_bot = SimpleNamespace(handlers=[])
+        callback_bot.on = lambda _pattern: lambda handler: callback_bot.handlers.append(handler) or handler
+        register_deposit(callback_bot)
+        callback = next(handler for handler in callback_bot.handlers if handler.__name__ == "cb_auto_upi_check")
+        repository = MongoRepository(client=mongomock.MongoClient(), database_name="auto_upi_callback_paid")
+        repository.ensure_indexes()
+        repository.ensure_user(7)
+        order = repository.create_auto_upi_order(7, 10, 10, "ORD20260924CALLBACK2", repository._now() + timedelta(minutes=5))
+        raw_message = payment_email(order["order_id"], 10, datetime.now(timezone.utc))
+        message = SimpleNamespace(message="payment", buttons=None, photo=None, edit=AsyncMock())
+        event = SimpleNamespace(
+            sender_id=7,
+            data=f"auto_upi_check:{order['order_id']}".encode(),
+            pattern_match=SimpleNamespace(group=lambda _index: order["order_id"].encode()),
+            message=message,
+            answer=AsyncMock(),
+        )
+        FakeImap.raw_messages = [raw_message]
+        with patch.object(auto_upi_verifier, "repository", repository), \
+                patch("plugins.deposit.repository", repository), \
+                patch("utils.imap_verifier.get_imap_credentials", return_value=("test@example.com", "test-password")), \
+                patch("utils.imap_verifier.imaplib.IMAP4_SSL", FakeImap):
+            asyncio.run(callback(event))
+            first_balance = repository.get_user(7)["balance"]
+            asyncio.run(callback(event))
+        self.assertEqual(first_balance, 10)
+        self.assertEqual(repository.get_user(7)["balance"], 10)
+        self.assertIn("𝐀ᴜᴛᴏ 𝐕ᴇʀɪғɪᴇᴅ", message.edit.await_args_list[1].args[0])
 
 
 if __name__ == "__main__":

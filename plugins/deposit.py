@@ -18,7 +18,6 @@ from utils.auto_upi_verifier import (
     payment_not_found_text,
     payment_success_text,
     verify_pending_order,
-    verify_current_user_order,
 )
 
 AUTO_UPI_VERIFICATION_TIMEOUT_SECONDS = 45
@@ -287,11 +286,7 @@ def register_deposit(bot):
 
         logger.info("[AUTO_UPI_CHECK] verification started order_id=%s", resolved_order_id)
         try:
-            verification = (
-                verify_pending_order(pending_order, bot, notify=False)
-                if order_id
-                else verify_current_user_order(e.sender_id, bot, notify=False)
-            )
+            verification = verify_pending_order(pending_order, bot, notify=False)
             result = await asyncio.wait_for(
                 verification,
                 timeout=AUTO_UPI_VERIFICATION_TIMEOUT_SECONDS,
