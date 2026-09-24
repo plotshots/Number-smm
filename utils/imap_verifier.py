@@ -35,6 +35,14 @@ OFFICIAL_SENDER_DOMAINS = [
 # Strict 30-minute window to completely block old payments/emails from past days!
 MAX_PAYMENT_AGE_MINUTES = 30
 
+
+def _purpose_matches_order(received_purpose, expected_purpose):
+    if received_purpose == expected_purpose:
+        return True
+    if "-" not in expected_purpose:
+        return False
+    return received_purpose.replace("-", "").casefold() == expected_purpose.replace("-", "").casefold()
+
 def _sync_verify_utr(utr_query, max_age_mins=MAX_PAYMENT_AGE_MINUTES):
     email_user, email_pass = get_imap_credentials()
     if not email_user or not email_pass:
@@ -241,7 +249,7 @@ def _sync_verify_auto_upi_order(order):
                 if not purpose_match:
                     continue
                 received_purpose = purpose_match.group(1)
-                if received_purpose != purpose and received_purpose.replace("-", "").casefold() != purpose.replace("-", "").casefold():
+                if not _purpose_matches_order(received_purpose, purpose):
                     continue
 
                 amount_match = re.search(

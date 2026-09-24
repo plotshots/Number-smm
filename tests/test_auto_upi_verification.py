@@ -19,7 +19,12 @@ from mongo_repository import MongoRepository
 from utils import auto_upi_verifier
 from utils.auto_upi_verifier import payment_not_found_text, payment_success_text
 from utils.imap_verifier import verify_auto_upi_order
-from plugins.deposit import _build_auto_upi_uri, register_deposit
+from plugins.deposit import (
+    _build_auto_upi_uri,
+    _edit_auto_upi_status_message,
+    generate_auto_upi_order_id,
+    register_deposit,
+)
 
 
 class FakeImap:
@@ -59,7 +64,7 @@ def payment_email(purpose, amount, when, sender="no-reply@famapp.in", outgoing=F
     return message.as_bytes()
 
 
-def pending_order(purpose="ORD-TEST-123", amount=100, created_at=None, expires_at=None):
+def pending_order(purpose="ORD20260924TEST0001", amount=100, created_at=None, expires_at=None):
     now = datetime.now(timezone.utc)
     return {
         "_id": purpose,
@@ -90,7 +95,7 @@ class AutoUpiVerificationTests(unittest.TestCase):
         self.assertEqual(result[1]["purpose"], order["purpose"])
         self.assertEqual(result[1]["amount"], order["payable_amount"])
 
-    def test_matches_fampay_normalized_purpose_without_hyphens(self):
+    def test_legacy_hyphenated_order_matches_normalized_fampay_purpose(self):
         order = pending_order(purpose="ORD-20260924-CD937E82")
         result = self.verify_email(
             order,
@@ -98,6 +103,14 @@ class AutoUpiVerificationTests(unittest.TestCase):
         )
         self.assertEqual(result[0], True)
         self.assertEqual(result[1]["purpose"], order["purpose"])
+
+    def test_new_order_requires_exact_canonical_purpose(self):
+        order = pending_order(purpose="ORD20260924CD937E82")
+        result = self.verify_email(
+            order,
+            payment_email("ORD-20260924-CD937E82", order["payable_amount"], datetime.now(timezone.utc)),
+        )
+        self.assertEqual(result[0], False)
 
     def test_rejects_different_order_id_after_normalization(self):
         order = pending_order(purpose="ORD-20260924-CD937E82")
@@ -108,7 +121,7 @@ class AutoUpiVerificationTests(unittest.TestCase):
         self.assertEqual(result[0], False)
 
     def test_qr_uri_preserves_order_id_in_tn_and_tr(self):
-        order_id = "ORD-20260924-CD937E82"
+        order_id = "ORD20260924CD937E82"
         uri = _build_auto_upi_uri("merchant@upi", {
             "order_id": order_id,
             "payable_amount": 100,
@@ -116,6 +129,31 @@ class AutoUpiVerificationTests(unittest.TestCase):
         decoded = urllib.parse.parse_qs(urllib.parse.urlsplit(uri).query)
         self.assertEqual(decoded["tn"], [order_id])
         self.assertEqual(decoded["tr"], [order_id])
+
+    def test_new_order_id_format_is_canonical(self):
+        order_id = generate_auto_upi_order_id(
+            datetime(2026, 9, 24, tzinfo=timezone.utc),
+            "CD937E82",
+        )
+        self.assertEqual(order_id, "ORD20260924CD937E82")
+        self.assertRegex(order_id, r"^ORD\d{8}[A-Z0-9]{8}$")
+        self.assertNotIn("-", order_id)
+
+    def test_new_order_stores_canonical_id_in_mongo(self):
+        repository = MongoRepository(client=mongomock.MongoClient(), database_name="auto_upi_id_format_test")
+        order_id = generate_auto_upi_order_id(
+            datetime(2026, 9, 24, tzinfo=timezone.utc),
+            "CD937E82",
+        )
+        order = repository.create_auto_upi_order(
+            7, 100, 100, order_id, repository._now() + timedelta(minutes=5),
+        )
+
+        stored = repository.db.upi_orders.find_one({"_id": order_id})
+        self.assertEqual(order["order_id"], "ORD20260924CD937E82")
+        self.assertEqual(stored["order_id"], "ORD20260924CD937E82")
+        self.assertEqual(stored["purpose"], "ORD20260924CD937E82")
+        self.assertNotIn("-", stored["order_id"])
 
     def test_rejects_wrong_amount_and_wrong_purpose(self):
         order = pending_order()
@@ -156,7 +194,7 @@ class AutoUpiVerificationTests(unittest.TestCase):
         repository.ensure_indexes()
         repository.ensure_user(7)
         order = repository.create_auto_upi_order(
-            7, 100, 100, "ORD-CONCURRENT-1", repository._now() + timedelta(minutes=5),
+            7, 100, 100, "ORD20260924CONCUR01", repository._now() + timedelta(minutes=5),
         )
 
         async def verified_payment(_order):
@@ -193,10 +231,16 @@ class AutoUpiVerificationTests(unittest.TestCase):
         callback_bot = CallbackBot()
         register_deposit(callback_bot)
         callback = next(handler for handler in callback_bot.handlers if handler.__name__ == "cb_auto_upi_check")
+        callback_message = SimpleNamespace(message=payment_not_found_text(), buttons=None, photo=None)
+
+        async def edit_message(text, buttons=None):
+            callback_message.message = text
+            callback_message.buttons = buttons
+
+        callback_message.edit = AsyncMock(side_effect=edit_message)
         event = SimpleNamespace(
             sender_id=7,
-            message=SimpleNamespace(message=payment_not_found_text()),
-            edit=AsyncMock(),
+            message=callback_message,
             answer=AsyncMock(),
         )
         pending_result = {"status": "pending", "credited": False}
@@ -206,9 +250,11 @@ class AutoUpiVerificationTests(unittest.TestCase):
             asyncio.run(callback(event))
 
         self.assertEqual(verify.await_count, 2)
-        self.assertEqual(event.edit.await_count, 2)
-        self.assertEqual(event.edit.await_args_list[0].args, ("⏳ Checking your payment",))
-        self.assertEqual(event.edit.await_args_list[1].args, ("⏳ Checking your payment",))
+        self.assertEqual(callback_message.edit.await_count, 4)
+        self.assertEqual(
+            [call.args[0] for call in callback_message.edit.await_args_list],
+            ["⏳ Checking your payment", payment_not_found_text(), "⏳ Checking your payment", payment_not_found_text()],
+        )
         self.assertEqual(event.answer.await_count, 2)
 
     def test_check_status_edits_checking_then_auto_verified_success(self):
@@ -230,20 +276,16 @@ class AutoUpiVerificationTests(unittest.TestCase):
             "credited": True,
             "result": {"amount": 100, "previous_balance": 25, "balance": 125},
         }
-        event = SimpleNamespace(
-            sender_id=7,
-            message=SimpleNamespace(message="payment QR"),
-            edit=AsyncMock(),
-            answer=AsyncMock(),
-        )
+        callback_message = SimpleNamespace(message="payment status", buttons=None, photo=None, id=1, edit=AsyncMock())
+        event = SimpleNamespace(sender_id=7, message=callback_message, answer=AsyncMock())
         with patch("plugins.deposit.repository.get_current_pending_auto_upi_order", return_value=pending_order()), \
                 patch("plugins.deposit.verify_current_user_order", new=AsyncMock(return_value=success_result)) as verify:
             asyncio.run(callback(event))
 
         verify.assert_awaited_once()
         success_text = payment_success_text(100, 25, 125)
-        self.assertEqual(event.edit.await_args_list[0].args, ("⏳ Checking your payment",))
-        self.assertEqual(event.edit.await_args_list[1].args, (success_text,))
+        self.assertEqual(callback_message.edit.await_args_list[0].args, ("⏳ Checking your payment",))
+        self.assertEqual(callback_message.edit.await_args_list[1].args, (success_text,))
         self.assertIn("🤖 𝐀ᴜᴛᴏ 𝐕ᴇʀɪғɪᴇᴅ", success_text)
 
     def test_check_status_exception_replaces_checking_state(self):
@@ -260,18 +302,45 @@ class AutoUpiVerificationTests(unittest.TestCase):
         callback_bot = CallbackBot()
         register_deposit(callback_bot)
         callback = next(handler for handler in callback_bot.handlers if handler.__name__ == "cb_auto_upi_check")
-        event = SimpleNamespace(
-            sender_id=7,
-            message=SimpleNamespace(message="payment QR"),
-            edit=AsyncMock(),
-            answer=AsyncMock(),
-        )
+        callback_message = SimpleNamespace(message="payment status", buttons=None, photo=None, id=1, edit=AsyncMock())
+        event = SimpleNamespace(sender_id=7, message=callback_message, answer=AsyncMock())
         with patch("plugins.deposit.repository.get_current_pending_auto_upi_order", return_value=pending_order()), \
                 patch("plugins.deposit.verify_current_user_order", new=AsyncMock(side_effect=RuntimeError("imap unavailable"))):
             asyncio.run(callback(event))
 
-        self.assertEqual(event.edit.await_args_list[0].args, ("⏳ Checking your payment",))
-        self.assertIn("temporarily unavailable", event.edit.await_args_list[1].args[0])
+        self.assertEqual(callback_message.edit.await_args_list[0].args, ("⏳ Checking your payment",))
+        self.assertIn("temporarily unavailable", callback_message.edit.await_args_list[1].args[0])
+
+    def test_status_edit_uses_photo_caption_target_when_callback_message_is_media(self):
+        callback_message = SimpleNamespace(
+            id=10,
+            message="QR caption",
+            buttons=None,
+            photo=object(),
+            edit=AsyncMock(),
+        )
+        callback = SimpleNamespace(sender_id=7, message=callback_message, answer=AsyncMock())
+
+        asyncio.run(_edit_auto_upi_status_message(callback, "Updated caption"))
+
+        callback_message.edit.assert_awaited_once_with("Updated caption", buttons=None)
+
+    def test_status_edit_handles_deleted_message_without_affecting_verification(self):
+        callback_message = SimpleNamespace(
+            id=11,
+            message="Payment status",
+            buttons=None,
+            photo=None,
+            edit=AsyncMock(side_effect=RuntimeError("message to edit not found")),
+        )
+        callback = SimpleNamespace(sender_id=7, message=callback_message, answer=AsyncMock())
+
+        with patch("plugins.deposit.logger.exception") as log_exception:
+            result = asyncio.run(_edit_auto_upi_status_message(callback, "Updated status"))
+
+        self.assertFalse(result)
+        callback.answer.assert_awaited_once()
+        log_exception.assert_called()
 
     def test_paid_order_status_lookup_does_not_credit_again(self):
         paid_order = pending_order()

@@ -91,6 +91,59 @@ def get_admin_custom_keypad(dep_id):
 def get_manual_deposit(deposit_id):
     return repository.get_deposit(deposit_id)
 
+
+def _auto_upi_button_signature(buttons):
+    return tuple(
+        tuple((getattr(button, "text", None), getattr(button, "data", None)) for button in row)
+        for row in (buttons or [])
+    )
+
+
+async def _edit_auto_upi_status_message(callback_query, text, buttons=None):
+    target_message = getattr(callback_query, "message", None)
+    if target_message is None:
+        logger.error("AUTO_UPI_CHECK: callback has no target message user_id=%s", callback_query.sender_id)
+        try:
+            await callback_query.answer("This payment message is no longer available.", alert=True)
+        except Exception:
+            logger.exception("AUTO_UPI_CHECK: failed to answer callback without target message user_id=%s", callback_query.sender_id)
+        return False
+
+    is_photo_message = getattr(target_message, "photo", None) is not None
+    current_text = getattr(target_message, "message", None)
+    if current_text == text and _auto_upi_button_signature(getattr(target_message, "buttons", None)) == _auto_upi_button_signature(buttons):
+        return False
+
+    try:
+        edit_kind = "caption" if is_photo_message else "text"
+        logger.debug("AUTO_UPI_CHECK: editing %s status message id=%s", edit_kind, getattr(target_message, "id", None))
+        await target_message.edit(text, buttons=buttons)
+        return True
+    except MessageNotModifiedError:
+        current_text = getattr(target_message, "message", None)
+        current_buttons = _auto_upi_button_signature(getattr(target_message, "buttons", None))
+        requested_buttons = _auto_upi_button_signature(buttons)
+        if current_text == text and current_buttons == requested_buttons:
+            return False
+        logger.exception("AUTO_UPI_CHECK: Telegram reported an unexpected unchanged-message response")
+        try:
+            await callback_query.answer("Payment status message could not be updated.", alert=True)
+        except Exception:
+            logger.exception("AUTO_UPI_CHECK: failed to answer unchanged-message edit failure user_id=%s", callback_query.sender_id)
+        return False
+    except Exception:
+        logger.exception(
+            "AUTO_UPI_CHECK: failed to edit %s status message user_id=%s message_id=%s",
+            edit_kind,
+            callback_query.sender_id,
+            getattr(target_message, "id", None),
+        )
+        try:
+            await callback_query.answer("Payment status message is no longer editable.", alert=True)
+        except Exception:
+            logger.exception("AUTO_UPI_CHECK: failed to answer edit failure user_id=%s", callback_query.sender_id)
+        return False
+
 # We will skip the automated UPI part in this script to save space if needed, 
 # or I can port it directly. The user had a keypad logic for UPI amounts.
 def get_keypad():
@@ -117,10 +170,17 @@ def _build_auto_upi_uri(active_upi, order):
     })
     return f"upi://pay?{params}"
 
+
+def generate_auto_upi_order_id(created_at=None, suffix=None):
+    created_at = created_at or datetime.now(timezone.utc)
+    suffix = (suffix or uuid.uuid4().hex[:8]).upper()
+    return f"ORD{created_at:%Y%m%d}{suffix}"
+
+
 async def create_auto_upi_payment(event, amount):
     uid = event.sender_id
     amount = int(amount)
-    purpose = f"ORD-{datetime.now(timezone.utc):%Y%m%d}-{uuid.uuid4().hex[:8].upper()}"
+    purpose = generate_auto_upi_order_id()
     expires_at = repository._now() + timedelta(seconds=AUTO_CANCEL_SECONDS)
     order = repository.create_auto_upi_order(uid, amount, amount, purpose, expires_at)
 
@@ -168,13 +228,7 @@ def register_deposit(bot):
     @bot.on(events.CallbackQuery(pattern=b"^auto_upi_check$"))
     async def cb_auto_upi_check(e):
         checking_text = "⏳ Checking your payment"
-        try:
-            if e.message.message != checking_text:
-                await e.edit(checking_text)
-        except MessageNotModifiedError:
-            pass
-        except Exception:
-            logger.exception("AUTO_UPI_CHECK: status message update failed user_id=%s", e.sender_id)
+        await _edit_auto_upi_status_message(e, checking_text)
         logger.info("AUTO_UPI_CHECK: callback received user_id=%s", e.sender_id)
         pending_order = repository.get_current_pending_auto_upi_order(e.sender_id)
         logger.info(
@@ -191,11 +245,7 @@ def register_deposit(bot):
                 pending_order.get("order_id") if pending_order else None,
             )
             error_text = "⚠️ <b>Payment verification is temporarily unavailable.</b>\nPlease try again shortly."
-            try:
-                if e.message.message != error_text:
-                    await e.edit(error_text)
-            except MessageNotModifiedError:
-                pass
+            await _edit_auto_upi_status_message(e, error_text)
             return
 
         if result.get("status") == "paid":
@@ -210,30 +260,18 @@ def register_deposit(bot):
             success_text = payment_success_text(
                 payment["amount"], payment["previous_balance"], payment["balance"],
             )
-            if e.message.message != success_text:
-                try:
-                    await e.edit(success_text)
-                except MessageNotModifiedError:
-                    pass
+            await _edit_auto_upi_status_message(e, success_text)
             return
         if result.get("status") == "expired":
             expired_text = payment_expired_text()
-            if e.message.message != expired_text:
-                try:
-                    await e.edit(expired_text)
-                except MessageNotModifiedError:
-                    pass
+            await _edit_auto_upi_status_message(e, expired_text)
             return
         not_found_text = payment_not_found_text()
         not_found_buttons = [
             [Button.inline("✅ CHECK PAYMENT STATUS", b"auto_upi_check")],
             [Button.inline("❌ CANCEL", b"auto_upi_cancel")],
         ]
-        if e.message.message != not_found_text:
-            try:
-                await e.edit(not_found_text, buttons=not_found_buttons)
-            except MessageNotModifiedError:
-                pass
+        await _edit_auto_upi_status_message(e, not_found_text, buttons=not_found_buttons)
         await e.answer("Payment not found yet.", alert=False)
 
     @bot.on(events.CallbackQuery(pattern=b"^auto_upi_cancel$"))
