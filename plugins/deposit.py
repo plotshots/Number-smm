@@ -4,7 +4,7 @@ import html
 import urllib.parse
 import io
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from telethon import events, Button
 from telethon.errors import MessageNotModifiedError
 from database import cur, db, get_usdt_rate, update_balance, approve_deposit, to_usd, get_log_channels_db, is_admin, repository
@@ -12,6 +12,12 @@ from config import AUTO_CANCEL_SECONDS, AUTO_UPI_ID, PE_GIFT, PE_LIGHTNING, P_MO
 from utils.keyboards import style_btn
 from utils.states import deposit_input, waiting_proof, admin_dep_state, custom_dep_amt, get_user_lock
 from utils.banners import send_bannered_message
+from utils.auto_upi_verifier import (
+    payment_expired_text,
+    payment_not_found_text,
+    payment_success_text,
+    verify_current_user_order,
+)
 
 async def deposit_menu(event):
     btns = [
@@ -103,7 +109,7 @@ def _keypad_message(amount):
 async def create_auto_upi_payment(event, amount):
     uid = event.sender_id
     amount = int(amount)
-    purpose = f"NMB-{uid}-{uuid.uuid4().hex[:12].upper()}"
+    purpose = f"ORD-{datetime.now(timezone.utc):%Y%m%d}-{uuid.uuid4().hex[:8].upper()}"
     expires_at = repository._now() + timedelta(seconds=AUTO_CANCEL_SECONDS)
     order = repository.create_auto_upi_order(uid, amount, amount, purpose, expires_at)
 
@@ -126,6 +132,21 @@ async def create_auto_upi_payment(event, amount):
         img.save(qr_file, "PNG")
         qr_file.seek(0)
         await bot.send_file(uid, qr_file)
+        payment_message = (
+            "🏦 <b>AUTOMATIC PAYMENT (UPI)</b>\n\n"
+            f"💰 Amount: ₹{order['payable_amount']}\n"
+            f"🆔 Order ID: {order['order_id']}\n\n"
+            "👇 Scan the QR above.\n"
+            "Click ✅ Check Payment Status after paying."
+        )
+        await bot.send_message(
+            uid,
+            payment_message,
+            buttons=[
+                [Button.inline("✅ CHECK PAYMENT STATUS", b"auto_upi_check")],
+                [Button.inline("❌ CANCEL", b"auto_upi_cancel")],
+            ],
+        )
     except Exception as exc:
         logger.error("Failed to send Auto UPI QR: %s", exc)
         await bot.send_message(uid, "❌ Unable to generate the payment QR right now. Please try again.")
@@ -137,6 +158,37 @@ def register_deposit(bot):
 
     @bot.on(events.CallbackQuery(pattern=r"^(open_deposit_menu|deposit_menu|depm_menu_main|depm_upi)$"))
     async def cb_deposit_menu_main(e):
+        await deposit_menu(e)
+
+    @bot.on(events.CallbackQuery(pattern=b"^auto_upi_check$"))
+    async def cb_auto_upi_check(e):
+        result = await verify_current_user_order(e.sender_id, bot, notify=False)
+        if result.get("status") is None:
+            return await e.answer("This payment session has expired or was already processed.", alert=True)
+        if result.get("status") == "paid":
+            payment = result["result"]
+            return await e.edit(
+                payment_success_text(
+                    payment["amount"], payment["previous_balance"], payment["balance"],
+                ),
+            )
+        if result.get("status") == "expired":
+            return await e.edit(payment_expired_text())
+        await e.edit(
+            payment_not_found_text(),
+            buttons=[
+                [Button.inline("✅ CHECK PAYMENT STATUS", b"auto_upi_check")],
+                [Button.inline("❌ CANCEL", b"auto_upi_cancel")],
+            ],
+        )
+        await e.answer("Payment not found yet.", alert=False)
+
+    @bot.on(events.CallbackQuery(pattern=b"^auto_upi_cancel$"))
+    async def cb_auto_upi_cancel(e):
+        order = repository.get_current_pending_auto_upi_order(e.sender_id)
+        if order:
+            repository.cancel_auto_upi_order(e.sender_id, order["_id"])
+        await e.answer("Payment cancelled.", alert=False)
         await deposit_menu(e)
 
     @bot.on(events.CallbackQuery(pattern=r"^dep_choose_(.+)$"))

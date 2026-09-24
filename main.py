@@ -14,6 +14,7 @@ from plugins import register_all_handlers
 from database import initialize_runtime
 
 from utils.health import start_health_server
+from utils.auto_upi_verifier import start_auto_upi_verifier
 
 async def register_bot_commands():
     await bot(functions.bots.SetBotCommandsRequest(
@@ -24,6 +25,7 @@ async def register_bot_commands():
 
 async def main():
     initialize_runtime()
+    start_auto_upi_verifier(bot)
     try:
         await start_health_server()
     except Exception as e:

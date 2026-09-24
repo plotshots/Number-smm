@@ -487,6 +487,140 @@ class MongoRepository:
         self.db.upi_orders.insert_one(document)
         return document
 
+    def get_current_pending_auto_upi_order(self, user_id):
+        """Return the user's newest pending Auto UPI order, if any."""
+        return self.db.upi_orders.find_one(
+            {"user_id": int(user_id), "status": "pending"},
+            sort=[("created_at", DESCENDING)],
+        )
+
+    def get_pending_auto_upi_orders(self):
+        """Return all pending Auto UPI orders for background verification."""
+        return list(self.db.upi_orders.find({"status": "pending"}).sort("created_at", ASCENDING))
+
+    def cancel_auto_upi_order(self, user_id, order_id):
+        """Cancel one pending order without changing a completed payment."""
+        return self.db.upi_orders.find_one_and_update(
+            {"_id": str(order_id), "user_id": int(user_id), "status": "pending"},
+            {"$set": {"status": "cancelled", "cancelled_at": self._now()}},
+            return_document=ReturnDocument.AFTER,
+        )
+
+    def expire_auto_upi_order(self, order_id):
+        """Expire an unpaid order only after its configured deadline."""
+        now = self._now()
+        return self.db.upi_orders.find_one_and_update(
+            {"_id": str(order_id), "status": "pending", "expires_at": {"$lte": now}},
+            {"$set": {"status": "expired", "expired_at": now}},
+            return_document=ReturnDocument.AFTER,
+        )
+
+    def complete_auto_upi_order(self, order_id, payment):
+        """Credit one verified Auto UPI order exactly once."""
+        try:
+            with self.transaction() as session:
+                return self._complete_auto_upi_order(order_id, payment, session=session)
+        except NotImplementedError as exc:
+            if "sessions" not in str(exc).lower():
+                raise
+            return self._complete_auto_upi_order_without_session(order_id, payment)
+
+    def _complete_auto_upi_order(self, order_id, payment, session=None):
+        find_kwargs = {"session": session} if session is not None else {}
+        now = self._now()
+        payment_amount = int(payment.get("amount", 0))
+        order = self.db.upi_orders.find_one_and_update(
+            {"_id": str(order_id), "status": "pending",
+             "payable_amount": payment_amount, "expires_at": {"$gt": now}},
+            {"$set": {
+                "status": "paid",
+                "paid_at": now,
+                "verification": dict(payment),
+            }},
+            return_document=ReturnDocument.BEFORE,
+            **find_kwargs,
+        )
+        if order is None:
+            existing = self.db.upi_orders.find_one({"_id": str(order_id)}, **find_kwargs)
+            return {
+                "credited": False,
+                "already_processed": True,
+                "status": existing.get("status") if existing else None,
+                "user_id": existing.get("user_id") if existing else None,
+                "amount": existing.get("payable_amount") if existing else None,
+                "order_id": existing.get("order_id") if existing else None,
+            }
+
+        amount = int(order.get("payable_amount", order.get("amount", 0)))
+        user = self.db.users.find_one_and_update(
+            {"_id": int(order["user_id"])},
+            {"$inc": {"balance": amount, "total_deposited": amount}},
+            return_document=ReturnDocument.AFTER,
+            **find_kwargs,
+        )
+        if user is None:
+            raise ValueError(f"user {order['user_id']} does not exist")
+        return {
+            "credited": True,
+            "already_processed": False,
+            "status": "paid",
+            "user_id": order["user_id"],
+            "amount": amount,
+            "previous_balance": user["balance"] - amount,
+            "balance": user["balance"],
+            "order_id": order["order_id"],
+        }
+
+    def _complete_auto_upi_order_without_session(self, order_id, payment):
+        now = self._now()
+        payment_amount = int(payment.get("amount", 0))
+        order = self.db.upi_orders.find_one_and_update(
+            {"_id": str(order_id), "status": "pending",
+             "payable_amount": payment_amount, "expires_at": {"$gt": now}},
+            {"$set": {"status": "processing", "verification": dict(payment)}},
+            return_document=ReturnDocument.BEFORE,
+        )
+        if order is None:
+            existing = self.db.upi_orders.find_one({"_id": str(order_id)})
+            return {
+                "credited": False,
+                "already_processed": True,
+                "status": existing.get("status") if existing else None,
+                "user_id": existing.get("user_id") if existing else None,
+                "amount": existing.get("payable_amount") if existing else None,
+                "order_id": existing.get("order_id") if existing else None,
+            }
+
+        amount = int(order.get("payable_amount", order.get("amount", 0)))
+        try:
+            user = self.db.users.find_one_and_update(
+                {"_id": int(order["user_id"])},
+                {"$inc": {"balance": amount, "total_deposited": amount}},
+                return_document=ReturnDocument.AFTER,
+            )
+            if user is None:
+                raise ValueError(f"user {order['user_id']} does not exist")
+            self.db.upi_orders.update_one(
+                {"_id": str(order_id), "status": "processing"},
+                {"$set": {"status": "paid", "paid_at": now}},
+            )
+            return {
+                "credited": True,
+                "already_processed": False,
+                "status": "paid",
+                "user_id": order["user_id"],
+                "amount": amount,
+                "previous_balance": user["balance"] - amount,
+                "balance": user["balance"],
+                "order_id": order["order_id"],
+            }
+        except Exception:
+            self.db.upi_orders.update_one(
+                {"_id": str(order_id), "status": "processing"},
+                {"$set": {"status": "pending"}},
+            )
+            raise
+
     def set_setting(self, key, value):
         self.db.settings.update_one({"_id": key}, {"$set": {"key": key, "value": value}}, upsert=True)
 

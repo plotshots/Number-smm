@@ -138,6 +138,48 @@ class MongoRuntimeTests(unittest.TestCase):
         self.assertEqual(stored["purpose"], order["purpose"])
         self.assertEqual(stored["status"], order["status"])
 
+    def test_auto_upi_completion_requires_exact_amount_and_credits_once(self):
+        from datetime import timedelta
+
+        self.repository.ensure_user(505)
+        order = self.repository.create_auto_upi_order(
+            505, 75, 75, "ORD-20260924-EXACT001", self.repository._now() + timedelta(minutes=10),
+        )
+
+        wrong_amount = self.repository.complete_auto_upi_order(
+            order["_id"], {"amount": 74, "email_msg_id": "<wrong@example.com>"},
+        )
+        self.assertTrue(wrong_amount["already_processed"])
+        self.assertEqual(self.repository.get_user(505)["balance"], 0)
+
+        completed = self.repository.complete_auto_upi_order(
+            order["_id"], {"amount": 75, "email_msg_id": "<payment@example.com>"},
+        )
+        repeated = self.repository.complete_auto_upi_order(
+            order["_id"], {"amount": 75, "email_msg_id": "<payment@example.com>"},
+        )
+        self.assertTrue(completed["credited"])
+        self.assertTrue(repeated["already_processed"])
+        self.assertEqual(completed["previous_balance"], 0)
+        self.assertEqual(completed["balance"], 75)
+        self.assertEqual(self.repository.get_user(505)["balance"], 75)
+
+    def test_auto_upi_expired_order_cannot_be_completed(self):
+        from datetime import timedelta
+
+        self.repository.ensure_user(606)
+        order = self.repository.create_auto_upi_order(
+            606, 80, 80, "ORD-20260924-EXPIRED1", self.repository._now() - timedelta(seconds=1),
+        )
+
+        expired = self.repository.expire_auto_upi_order(order["_id"])
+        result = self.repository.complete_auto_upi_order(
+            order["_id"], {"amount": 80, "email_msg_id": "<late@example.com>"},
+        )
+        self.assertEqual(expired["status"], "expired")
+        self.assertTrue(result["already_processed"])
+        self.assertEqual(self.repository.get_user(606)["balance"], 0)
+
     def test_manual_deposit_accept_and_custom_amount_are_one_time(self):
         self.repository.ensure_user(101)
         exact, _ = self.repository.create_manual_deposit(101, 250, "ManualUPI", "file-1", 101, 9001)

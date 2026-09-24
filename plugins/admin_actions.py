@@ -401,8 +401,7 @@ async def admin_actions(event):
         
         active_upi = AUTO_UPI_ID
         
-        gmail_res = cur.execute("SELECT value FROM settings WHERE key='gmail_user'").fetchone()
-        active_gmail = gmail_res[0] if gmail_res and gmail_res[0] else "vinitgodaragodara3@gmail.com"
+        active_gmail = os.getenv("GMAIL_USERNAME", "").strip() or "Not configured"
         
         msg = (f"<blockquote>💳 <b>𝐀ᴜᴛᴏ-𝐔𝐏𝐈 & 𝐈𝐌𝐀𝐏 𝐆ᴀᴛᴇᴡᴀʏ 𝐒ᴇᴛᴛɪɴɢs</b>\n\n"
                f"⚙️ <b>𝐃ᴇᴘᴏsɪᴛ 𝐌ᴏᴅᴇ:</b> <b>{mode_label}</b>\n"
@@ -431,8 +430,7 @@ async def admin_actions(event):
         dep_mode = nxt
         mode_label = "🟢 Auto (IMAP UTR)" if dep_mode == 'auto' else ("⚡ Hybrid (Auto + Fallback)" if dep_mode == 'hybrid' else "📂 Manual (Screenshots)")
         active_upi = AUTO_UPI_ID
-        gmail_res = cur.execute("SELECT value FROM settings WHERE key='gmail_user'").fetchone()
-        active_gmail = gmail_res[0] if gmail_res and gmail_res[0] else "vinitgodaragodara3@gmail.com"
+        active_gmail = os.getenv("GMAIL_USERNAME", "").strip() or "Not configured"
         
         msg = (f"<blockquote>💳 <b>𝐀ᴜᴛᴏ-𝐔𝐏𝐈 & 𝐈𝐌𝐀𝐏 𝐆ᴀᴛᴇᴡᴀʏ 𝐒ᴇᴛᴛɪɴɢs</b>\n\n"
                f"⚙️ <b>𝐃ᴇᴘᴏsɪᴛ 𝐌ᴏᴅᴇ:</b> <b>{mode_label}</b>\n"
@@ -453,6 +451,8 @@ async def admin_actions(event):
         await event.answer("Testing IMAP...", alert=False)
         from utils.imap_verifier import get_imap_credentials
         u, p = get_imap_credentials()
+        if not u or not p:
+            return await event.answer("❌ IMAP is not configured. Set GMAIL_USERNAME and GMAIL_APP_PASSWORD in the deployment environment.", alert=True)
         try:
             import ssl, imaplib
             context = ssl.create_default_context()
@@ -1045,17 +1045,11 @@ async def admin_actions(event):
                 await conv.send_message(f"{P_YES} <b>UPI ID Updated:</b> <code>{new_upi}</code>")
 
             elif action_data == "change_gmail" and has_perm(uid, 'p_settings'):
-                resp = await get_reply(f"📧 <b>Enter Gmail Address and 16-digit App Password:</b>\n\n<i>Format:</i> <code><email> <16-digit-app-password></code>\n<i>Example:</i> <code>myemail@gmail.com dqwo agxp srsw fdax</code>")
-                text = resp.text.strip()
-                parts = text.split(None, 1)
-                if len(parts) >= 2:
-                    g_email, g_pass = parts[0], parts[1]
-                    cur.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('gmail_user', ?)", (g_email,))
-                    cur.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('gmail_pass', ?)", (g_pass,))
-                    db.commit()
-                    await conv.send_message(f"{P_YES} <b>Gmail IMAP Credentials Updated!</b>\n• Email: <code>{g_email}</code>\n• App Password: <code>{g_pass[:4]} **** **** {g_pass[-4:]}</code>")
-                else:
-                    await conv.send_message(f"{P_NO} Invalid format. Provide both Gmail and 16-digit App Password.")
+                await conv.send_message(
+                    f"{P_NO} Gmail credentials are deployment settings now. Set "
+                    "<code>GMAIL_USERNAME</code> and <code>GMAIL_APP_PASSWORD</code> "
+                    "in the environment, then restart the bot."
+                )
 
             elif action_data == "ban" and has_perm(uid, 'p_bal'):
                 t_uid = int((await get_reply(f"{P_ACC} <b>User ID:</b>")).text)
