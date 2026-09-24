@@ -1,7 +1,7 @@
 import os
 import asyncio
 import logging
-from telethon import TelegramClient
+from telethon import TelegramClient, functions, types
 from config import BOT_TOKEN, API_ID, API_HASH, bot
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -15,6 +15,13 @@ from database import initialize_runtime
 
 from utils.health import start_health_server
 
+async def register_bot_commands():
+    await bot(functions.bots.SetBotCommandsRequest(
+        scope=types.BotCommandScopeDefault(),
+        lang_code="",
+        commands=[types.BotCommand(command="start", description="Start Bot")],
+    ))
+
 async def main():
     initialize_runtime()
     try:
@@ -26,6 +33,7 @@ async def main():
         try:
             if not bot.is_connected():
                 await bot.connect()
+            await register_bot_commands()
             print("✅ Numbott Modular (Telethon) STARTED SUCCESSFULLY", flush=True)
             await bot.run_until_disconnected()
         except Exception as err:

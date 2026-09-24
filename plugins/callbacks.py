@@ -261,19 +261,16 @@ def register_callbacks(bot):
     async def cb_my_orders(e):
         uid = e.sender_id
         rows = repository.get_orders_for_user(uid)
+        back_buttons = [[style_btn("🔙 𝐁ᴀᴄᴋ ᴛᴏ 𝐃ᴀsʜʙᴏᴀʀᴅ", b"dashboard_main", "danger", icon=6129812419028982717)]]
         if not rows:
             msg = f"<blockquote>{PE_GIFT} <b>𝐌ʏ 𝐎ʀᴅᴇʀs</b></blockquote>\n\n<blockquote>𝐍ᴏ ᴏʀᴅᴇʀs ʏᴇᴛ. 𝐁ᴜʏ ʏᴏᴜʀ ғɪʀsᴛ ᴀᴄᴄᴏᴜɴᴛ!</blockquote>"
-            if await send_bannered_message(bot, e, "orders", msg):
-                return
-            return await e.respond(msg)
+            return await e.edit(msg, buttons=back_buttons, parse_mode="html")
         msg = f"<blockquote>{PE_GIFT} <b>𝐌ʏ 𝐎ʀᴅᴇʀs</b> (𝐋ᴀsᴛ 10)</blockquote>\n\n"
         for row in rows:
             ph, cn, pr, dt = row.get("phone"), row.get("country"), row.get("price"), row.get("date")
             flag = get_flag_by_country_name(cn)
             msg += f"<blockquote>{flag} {cn} | <code>{ph}</code>\n{P_MONEY} {P_INR}{pr} | 📅 {_format_order_date(dt)}</blockquote>\n"
-        if await send_bannered_message(bot, e, "orders", msg):
-            return
-        await e.respond(msg)
+        await e.edit(msg, buttons=back_buttons, parse_mode="html")
 
     @bot.on(events.NewMessage(pattern=r"(?i)^(💰 𝐁ᴀʟᴀɴᴄᴇ|💰 Balance)$"))
     async def msg_balance(e):
@@ -295,9 +292,8 @@ def register_callbacks(bot):
         msg = (f"<blockquote>{PE_CROWN} <b>𝐘ᴏᴜʀ 𝐁ᴀʟᴀɴᴄᴇ</b></blockquote>\n\n"
                f"<blockquote>{P_MONEY} <b>𝐁ᴀʟᴀɴᴄᴇ:</b> <code>{P_INR}{bal}</code>\n"
                f"💲 <b>𝐔𝐒𝐃:</b> <code>${to_usd(bal):.2f}</code></blockquote>")
-        if await send_bannered_message(bot, e, "balance", msg):
-            return
-        await e.respond(msg)
+        back_buttons = [[style_btn("🔙 𝐁ᴀᴄᴋ ᴛᴏ 𝐃ᴀsʜʙᴏᴀʀᴅ", b"dashboard_main", "danger", icon=6129812419028982717)]]
+        await e.edit(msg, buttons=back_buttons, parse_mode="html")
 
     @bot.on(events.NewMessage(pattern=r"(?i)^(📩 𝐒ᴜᴘᴘᴏʀᴛ|📩 Support)$"))
     async def msg_support(e):
