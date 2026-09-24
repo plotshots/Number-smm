@@ -162,25 +162,65 @@ def register_deposit(bot):
 
     @bot.on(events.CallbackQuery(pattern=b"^auto_upi_check$"))
     async def cb_auto_upi_check(e):
-        result = await verify_current_user_order(e.sender_id, bot, notify=False)
+        logger.info("AUTO_UPI_CHECK: callback received user_id=%s", e.sender_id)
+        pending_order = repository.get_current_pending_auto_upi_order(e.sender_id)
+        logger.info(
+            "AUTO_UPI_CHECK: order_id=%s",
+            pending_order.get("order_id") if pending_order else None,
+        )
+        logger.info("AUTO_UPI_CHECK: starting payment verification")
+        logger.info("AUTO_UPI_CHECK: IMAP verification started")
+        try:
+            result = await verify_current_user_order(e.sender_id, bot, notify=False)
+        except Exception:
+            logger.exception(
+                "AUTO_UPI_CHECK: verification failed order_id=%s",
+                pending_order.get("order_id") if pending_order else None,
+            )
+            error_text = "⚠️ <b>Payment verification is temporarily unavailable.</b>\nPlease try again shortly."
+            try:
+                if e.message.message != error_text:
+                    await e.edit(error_text)
+            except MessageNotModifiedError:
+                pass
+            return
+
+        if result.get("status") == "paid":
+            logger.info("AUTO_UPI_CHECK: payment found")
+        elif result.get("status") in (None, "pending", "expired"):
+            logger.info("AUTO_UPI_CHECK: payment not found")
+        logger.info("AUTO_UPI_CHECK: verification finished")
         if result.get("status") is None:
             return await e.answer("This payment session has expired or was already processed.", alert=True)
         if result.get("status") == "paid":
             payment = result["result"]
-            return await e.edit(
-                payment_success_text(
-                    payment["amount"], payment["previous_balance"], payment["balance"],
-                ),
+            success_text = payment_success_text(
+                payment["amount"], payment["previous_balance"], payment["balance"],
             )
+            if e.message.message != success_text:
+                try:
+                    await e.edit(success_text)
+                except MessageNotModifiedError:
+                    pass
+            return
         if result.get("status") == "expired":
-            return await e.edit(payment_expired_text())
-        await e.edit(
-            payment_not_found_text(),
-            buttons=[
-                [Button.inline("✅ CHECK PAYMENT STATUS", b"auto_upi_check")],
-                [Button.inline("❌ CANCEL", b"auto_upi_cancel")],
-            ],
-        )
+            expired_text = payment_expired_text()
+            if e.message.message != expired_text:
+                try:
+                    await e.edit(expired_text)
+                except MessageNotModifiedError:
+                    pass
+            return
+        not_found_text = payment_not_found_text()
+        not_found_buttons = [
+            [Button.inline("✅ CHECK PAYMENT STATUS", b"auto_upi_check")],
+            [Button.inline("❌ CANCEL", b"auto_upi_cancel")],
+        ]
+        if e.message.message != not_found_text:
+            try:
+                await e.edit(not_found_text, buttons=not_found_buttons)
+            except MessageNotModifiedError:
+                pass
         await e.answer("Payment not found yet.", alert=False)
 
     @bot.on(events.CallbackQuery(pattern=b"^auto_upi_cancel$"))

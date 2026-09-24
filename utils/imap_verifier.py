@@ -6,6 +6,8 @@ import datetime
 import re
 import asyncio
 import os
+from email import policy
+from email.utils import parseaddr, parsedate_to_datetime
 from config import logger
 
 def get_imap_credentials():
@@ -173,33 +175,40 @@ def _sync_verify_auto_upi_order(order):
     if now_utc >= expires_at:
         return False, "Payment order has expired."
 
+    mail = None
     try:
         context = ssl.create_default_context()
         mail = imaplib.IMAP4_SSL("imap.gmail.com", 993, ssl_context=context)
         mail.login(email_user, email_pass)
         mail.select("INBOX")
         since_date = max(created_at, now_utc - datetime.timedelta(days=1)).strftime("%d-%b-%Y")
-        status, data = mail.search(None, f'(SINCE "{since_date}" TEXT "{purpose}")')
+        logger.info("AUTO_UPI: searching payment email order_id=%s", order_id)
+        status, data = mail.search(None, "SINCE", since_date)
         if status != "OK" or not data or not data[0]:
             return False, "Payment not found or not settled yet."
 
-        for mail_id in reversed(data[0].split()[-20:]):
+        for mail_id in data[0].split():
             status, msg_data = mail.fetch(mail_id, "(RFC822)")
             if status != "OK":
                 continue
             for part in msg_data:
-                if not isinstance(part, tuple):
+                if not isinstance(part, tuple) or len(part) < 2:
                     continue
-                msg = email.message_from_bytes(part[1])
-                from_header = (msg.get("From") or "").lower()
-                if not any(domain in from_header for domain in OFFICIAL_SENDER_DOMAINS):
+                msg = email.message_from_bytes(part[1], policy=policy.default)
+                sender = str(msg.get("From") or "")
+                sender_address = parseaddr(sender)[1].lower()
+                sender_match = any(
+                    sender_address == domain or sender_address.endswith(domain)
+                    for domain in OFFICIAL_SENDER_DOMAINS
+                )
+                if not sender_match:
                     continue
 
                 date_header = msg.get("Date")
                 if not date_header:
                     continue
                 try:
-                    email_dt = email.utils.parsedate_to_datetime(date_header)
+                    email_dt = parsedate_to_datetime(date_header)
                     if email_dt.tzinfo is None:
                         email_dt = email_dt.replace(tzinfo=datetime.timezone.utc)
                     email_dt = email_dt.astimezone(datetime.timezone.utc)
@@ -208,49 +217,64 @@ def _sync_verify_auto_upi_order(order):
                 if email_dt < created_at or email_dt >= expires_at or email_dt > now_utc:
                     continue
 
-                body = ""
+                parts = []
                 if msg.is_multipart():
                     for body_part in msg.walk():
-                        payload = body_part.get_payload(decode=True)
-                        if payload:
-                            body += payload.decode(errors="ignore") + " "
+                        if body_part.get_content_disposition() == "attachment":
+                            continue
+                        if body_part.get_content_type() in {"text/plain", "text/html"}:
+                            parts.append(str(body_part.get_content()))
                 else:
-                    payload = msg.get_payload(decode=True)
-                    if payload:
-                        body = payload.decode(errors="ignore")
+                    parts.append(str(msg.get_content()))
+                body = "\n".join(parts)
                 clean_text = re.sub(r"<[^<]+?>", " ", body)
                 clean_text = re.sub(r"\s+", " ", clean_text)
-                if purpose.lower() not in clean_text.lower() and order_id.lower() not in clean_text.lower():
+                received = (str(msg.get("Subject") or "") + "\n" + clean_text).lower()
+                outgoing_match = "your payment" in received or "successfully paid" in received
+                received_match = (
+                    re.search(r"you\s+received\s*(?:₹|inr)\s*[0-9]", received) is not None
+                    or "you have successfully received" in received
+                )
+                if outgoing_match or not received_match:
+                    continue
+                purpose_match = re.search(
+                    rf"purpose\s*:\s*{re.escape(purpose)}(?![A-Za-z0-9])",
+                    clean_text,
+                    re.IGNORECASE,
+                )
+                if not purpose_match:
                     continue
 
                 amount_match = re.search(
-                    r"(?:received|amount|payment)\s*[:=-]?\s*(?:₹|INR)?\s*([0-9]+(?:\.[0-9]+)?)"
-                    r"|₹\s*([0-9]+(?:\.[0-9]+)?)",
-                    clean_text,
+                    r"₹\s*([0-9][0-9,]*(?:\.\d+)?)",
+                    received,
                     re.I,
                 )
                 if not amount_match:
                     continue
-                amount = float(amount_match.group(1) or amount_match.group(2))
+                amount = float(amount_match.group(1).replace(",", ""))
                 if amount != expected_amount:
                     continue
 
+                logger.info("AUTO_UPI: payment matched order_id=%s", order_id)
                 return True, {
                     "email_msg_id": (msg.get("Message-ID") or "").strip(),
                     "amount": int(amount) if amount.is_integer() else amount,
                     "purpose": purpose,
                     "received_at": email_dt,
-                    "sender": from_header,
+                    "sender": sender_address,
                 }
+        logger.info("AUTO_UPI: payment not matched order_id=%s", order_id)
         return False, "Payment not found or not settled yet."
     except Exception as exc:
         logger.error("Auto UPI IMAP verification exception: %s", exc)
         return False, "Payment verification server error."
     finally:
-        try:
-            mail.logout()
-        except Exception:
-            pass
+        if mail is not None:
+            try:
+                mail.logout()
+            except Exception:
+                pass
 
 
 async def verify_auto_upi_order(order):

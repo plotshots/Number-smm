@@ -62,7 +62,14 @@ async def _notify_paid(order, result, telegram_bot):
 async def verify_pending_order(order, telegram_bot=bot, notify=True):
     """Verify and settle one pending order, returning its state transition."""
     if not order or order.get("status") != "pending":
+        logger.info(
+            "AUTO_UPI: already completed / duplicate prevented order_id=%s",
+            order.get("order_id") if order else None,
+        )
         return {"status": order.get("status") if order else None, "credited": False}
+
+    logger.info("AUTO_UPI: verification started order_id=%s", order.get("order_id"))
+    logger.info("AUTO_UPI: order identified order_id=%s", order.get("order_id"))
 
     if _is_expired(order):
         expired = repository.expire_auto_upi_order(order["_id"])
@@ -90,9 +97,14 @@ async def verify_pending_order(order, telegram_bot=bot, notify=True):
 
     result = repository.complete_auto_upi_order(order["_id"], payment)
     if result.get("credited"):
+        logger.info("AUTO_UPI: payment completed order_id=%s", order.get("order_id"))
         if notify:
             await _notify_paid(order, result, telegram_bot)
         return {"status": "paid", "credited": True, "result": result}
+    logger.info(
+        "AUTO_UPI: already completed / duplicate prevented order_id=%s",
+        order.get("order_id"),
+    )
     return {
         "status": result.get("status"),
         "credited": False,
