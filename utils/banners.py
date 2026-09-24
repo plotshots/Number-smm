@@ -35,11 +35,18 @@ async def send_bannered_message(bot, event, key, caption, buttons=None, enabled_
         if not banner.get("file_id"):
             return False
         if key == "home":
+            home_media = banner["file_id"]
+            if banner.get("access_hash") and banner.get("file_reference"):
+                home_media = types.InputPhoto(
+                    id=int(banner["file_id"]),
+                    access_hash=int(banner["access_hash"]),
+                    file_reference=bytes.fromhex(banner["file_reference"]),
+                )
             if isinstance(event, events.CallbackQuery.Event):
-                await event.edit(caption, file=banner["file_id"], buttons=buttons, parse_mode="html")
+                await event.edit(caption, file=home_media, buttons=buttons, parse_mode="html")
             else:
                 await bot.send_file(
-                    event.chat_id, banner["file_id"], caption=caption, buttons=buttons,
+                    event.chat_id, home_media, caption=caption, buttons=buttons,
                     parse_mode="html", force_document=False,
                 )
             return True

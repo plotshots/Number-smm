@@ -1,6 +1,6 @@
 from telethon import events, Button
 
-from database import get_start_image_url, is_admin, has_perm, repository
+from database import is_admin, has_perm, repository
 from utils.banners import BANNER_SECTIONS
 from utils.banners import send_bannered_message
 from utils.keyboards import style_btn
@@ -12,10 +12,14 @@ def _allowed(uid):
 
 
 def _banner_for_menu(key):
-    banner = repository.get_banner(key)
-    if banner or key != "home":
-        return banner
-    return {"enabled": bool(get_start_image_url()), "url": get_start_image_url()}
+    return repository.get_banner(key)
+
+
+def _banner_enabled(banner, key):
+    return bool(
+        banner and banner.get("enabled")
+        and (key != "home" or banner.get("file_id"))
+    )
 
 
 async def banner_menu(event):
@@ -24,7 +28,7 @@ async def banner_menu(event):
     buttons = []
     for key, label in BANNER_SECTIONS.items():
         banner = _banner_for_menu(key)
-        status = "🟢 ON" if banner and banner.get("enabled") else "🔴 OFF"
+        status = "🟢 ON" if _banner_enabled(banner, key) else "🔴 OFF"
         buttons.append([style_btn(f"{label}: {status}", f"banner_section|{key}", "primary")])
     buttons.append([style_btn("🔙 Back to Admin", "adm_adminmain", "danger")])
     await event.edit("<b>🖼️ Banner Management</b>\n\nSelect a section:", buttons=buttons)
@@ -34,7 +38,7 @@ async def banner_section(event, key):
     if not _allowed(event.sender_id) or key not in BANNER_SECTIONS:
         return await event.answer("Access denied.", alert=True)
     banner = _banner_for_menu(key)
-    enabled = bool(banner and banner.get("enabled"))
+    enabled = _banner_enabled(banner, key)
     buttons = [
         [style_btn("🔴 Turn OFF" if enabled else "🟢 Turn ON", f"banner_toggle|{key}", "danger" if enabled else "success")],
         [style_btn("🖼️ Change Banner", f"banner_change|{key}", "primary"), style_btn("👁️ Preview", f"banner_preview|{key}", "primary")],
@@ -58,11 +62,7 @@ def register_banner_management(bot):
         if not _allowed(e.sender_id) or key not in BANNER_SECTIONS:
             return await e.answer("Access denied.", alert=True)
         banner = repository.get_banner(key)
-        if not banner:
-            if key == "home":
-                repository.save_banner_url(key, get_start_image_url())
-                repository.set_banner_enabled(key, False)
-                return await banner_section(e, key)
+        if not banner or (key == "home" and not banner.get("file_id")):
             return await e.answer("Upload a banner first.", alert=True)
         repository.set_banner_enabled(key, not bool(banner.get("enabled")))
         await banner_section(e, key)
@@ -83,10 +83,8 @@ def register_banner_management(bot):
         if not _allowed(e.sender_id) or key not in BANNER_SECTIONS:
             return await e.answer("Access denied.", alert=True)
         banner = _banner_for_menu(key)
-        if not banner or not (banner.get("file_id") or banner.get("url")):
+        if not banner or not banner.get("file_id"):
             return await e.answer("No banner uploaded.", alert=True)
-        if key == "home" and not repository.get_banner(key) and banner.get("url"):
-            repository.save_banner_url(key, banner["url"])
         if not await send_bannered_message(
             bot, e, key, BANNER_SECTIONS[key], enabled_only=False,
         ):
@@ -99,18 +97,20 @@ def register_banner_management(bot):
             return
         state = admin_state.pop(e.sender_id)
         try:
-            if state["key"] == "home":
-                file_id = getattr(e.media.photo, "id", None)
-                if not file_id:
-                    raise ValueError("Telegram photo has no file id")
-                repository.save_banner_file_id(state["key"], file_id)
-                return await e.reply("✅ Home banner saved. It is OFF until you turn it ON.")
+            photo = e.media.photo
+            max(
+                photo.sizes,
+                key=lambda size: getattr(size, "w", 0) * getattr(size, "h", 0),
+            )
+            photo_file_id = str(photo.id)
             content = await e.download_media(file=bytes)
             filename = getattr(e.file, "name", None) or f"{state['key']}.jpg"
             content_type = getattr(e.file, "mime_type", None) or "image/jpeg"
             saved = repository.save_banner(
-                state["key"], content, str(e.media.photo.id),
+                state["key"], content, photo_file_id,
                 filename=filename, content_type=content_type,
+                access_hash=photo.access_hash,
+                file_reference=photo.file_reference,
             )
             await e.reply("✅ Banner uploaded. It is OFF until you turn it ON.")
         except Exception:

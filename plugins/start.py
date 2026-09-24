@@ -1,7 +1,7 @@
 import html
 from telethon import events, types, Button
 from telethon.errors import MessageNotModifiedError
-from database import cur, db, ensure_user, is_user_banned, is_bot_online, is_admin, get_support_url, get_start_image_url, repository
+from database import cur, db, ensure_user, is_user_banned, is_bot_online, is_admin, get_support_url, repository
 from utils.keyboards import get_persistent_menu, get_terms_buttons, get_join_buttons, style_btn, style_url
 from utils.helpers import check_channel_joined, to_small_caps, send_preview_on_top
 from config import PE_FLOWER, PE_LOCATION, P_OFF, P_INR, JOIN_URLS, TERMS_URL, logger
@@ -61,7 +61,20 @@ async def send_main_menu(bot, event, uid):
     except Exception as banner_error:
         logger.warning(f"Could not load Home banner: {banner_error}")
         home_banner = None
-    start_img = home_banner.get("file_id") if home_banner else None
+    start_img = None
+    start_photo = None
+    if home_banner and home_banner.get("file_id"):
+        try:
+            start_photo = types.InputPhoto(
+                id=int(home_banner["file_id"]),
+                access_hash=int(home_banner["access_hash"]),
+                file_reference=bytes.fromhex(home_banner["file_reference"]),
+            )
+        except (KeyError, TypeError, ValueError):
+            start_img = home_banner.get("file_id")
+            logger.warning("Home banner has no reusable photo metadata; using stored file ID")
+    if home_banner and home_banner.get("file_id") and start_photo is None and start_img is None:
+        start_img = home_banner.get("file_id")
     support_url = get_support_url()
     support_handle = f"@{support_url.split('/')[-1]}" if support_url.startswith("https://t.me/") else support_url
     
@@ -87,10 +100,10 @@ async def send_main_menu(bot, event, uid):
     ]
     
     edit_id = event.message_id if isinstance(event, events.CallbackQuery.Event) else None
-    if start_img:
+    if start_photo or start_img:
         edit_has_media = bool(getattr(getattr(event, "message", None), "media", None))
         await send_preview_on_top(
-            bot, uid, msg, start_img, buttons=buttons,
+            bot, uid, msg, start_photo or start_img, buttons=buttons,
             edit_msg_id=edit_id, edit_has_media=edit_has_media,
         )
     elif edit_id:

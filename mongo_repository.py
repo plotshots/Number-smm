@@ -103,7 +103,10 @@ class MongoRepository:
             query["enabled"] = True
         return self.db.banners.find_one(query)
 
-    def save_banner(self, key, content, file_id, filename=None, content_type=None):
+    def save_banner(
+        self, key, content, file_id, filename=None, content_type=None,
+        access_hash=None, file_reference=None,
+    ):
         now = self._now()
         existing = self.get_banner(key)
         filename = filename or f"{key}.jpg"
@@ -116,6 +119,10 @@ class MongoRepository:
             "created_at": existing.get("created_at", now) if existing else now,
             "updated_at": now,
         }
+        if access_hash is not None:
+            document["access_hash"] = str(access_hash)
+        if file_reference is not None:
+            document["file_reference"] = bytes(file_reference).hex()
         self.db.banners.replace_one({"key": str(key)}, document, upsert=True)
         if existing and existing.get("gridfs_id"):
             try:
