@@ -63,5 +63,5 @@ def get_keypad():
         [style_btn("4", b"kp_4", style_type="primary", icon=5409320020058584473), style_btn("5", b"kp_5", style_type="primary", icon=6064310143380625195), style_btn("6", b"kp_6", style_type="primary", icon=6129399728506412489)],
         [style_btn("7", b"kp_7", style_type="primary", icon=6129779562529168023), style_btn("8", b"kp_8", style_type="primary", icon=6154249597532248059), style_btn("9", b"kp_9", style_type="primary", icon=6129812419028982717)],
         [style_btn("Del", b"kp_del", style_type="danger", icon=6129731974291527294), style_btn("0", b"kp_0", style_type="primary", icon=6203982793379154737), style_btn("Confirm", b"kp_done", style_type="success", icon=6129399728506412489)],
-        [style_btn("𝐂ᴀɴᴄᴇʟ", b"cancel_action", style_type="danger", icon=6064310143380625195)]
+        [style_btn("⬅️ 𝐁ᴀᴄᴋ", b"kp_back", style_type="danger", icon=6064310143380625195)]
     ]

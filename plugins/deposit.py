@@ -172,7 +172,7 @@ def get_keypad():
         [style_btn("4", b"kp_4", style_type="primary", icon=6064275556008989746), style_btn("5", b"kp_5", style_type="primary", icon=6129627894349045589), style_btn("6", b"kp_6", style_type="primary", icon=5409320020058584473)],
         [style_btn("7", b"kp_7", style_type="primary", icon=5375125990118793401), style_btn("8", b"kp_8", style_type="primary", icon=6129731974291527294), style_btn("9", b"kp_9", style_type="primary", icon=6170048080679801421)],
         [style_btn("Del", b"kp_del", style_type="danger", icon=6203982793379154737), style_btn("0", b"kp_0", style_type="primary", icon=5408832111773757273), style_btn("Confirm", b"kp_done", style_type="success", icon=6064310143380625195)],
-        [style_btn("𝐂ᴀɴᴄᴇʟ", b"cancel_action", style_type="danger", icon=5796170975699544141)]
+        [style_btn("⬅️ 𝐁ᴀᴄᴋ", b"kp_back", style_type="danger", icon=5796170975699544141)]
     ]
 
 def _keypad_message(amount):
@@ -374,7 +374,7 @@ def register_deposit(bot):
         method = e.pattern_match.group(1).decode()
         await manual_deposit_init(e, method)
 
-    @bot.on(events.CallbackQuery(pattern=r"^kp_(\d|del|done)$"))
+    @bot.on(events.CallbackQuery(pattern=r"^kp_(\d|del|done|back)$"))
     async def cb_auto_upi_keypad(e):
         uid = e.sender_id
         state = deposit_input.get(uid)
@@ -383,6 +383,9 @@ def register_deposit(bot):
 
         key = e.pattern_match.group(1).decode()
         amount = state.get('amount', '')
+        if key == 'back':
+            deposit_input.pop(uid, None)
+            return await deposit_menu(e)
         if key == 'del':
             state['amount'] = amount[:-1]
         elif key == 'done':

@@ -35,11 +35,9 @@ async def send_start_sticker_or_menu(bot, uid):
             except Exception as ex:
                 logger.warning(f"Failed to send local sticker {local_p}: {ex}")
 
-    # 3. Fallback: send clean minimal emoji greeting with keyboard
-    try:
-        return await bot.send_message(uid, "👋", buttons=get_persistent_menu(uid))
-    except Exception as ex:
-        logger.warning(f"Fallback keyboard send failed: {ex}")
+    # Do not replace the welcome sticker with a text message. The caller still
+    # continues to the Dashboard if all sticker sends fail.
+    logger.warning("No valid START sticker could be sent")
 
 async def send_main_menu(bot, event, uid):
     me = await bot.get_me()
