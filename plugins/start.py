@@ -10,7 +10,6 @@ from utils.states import session_buy_state, deposit_input
 async def send_start_sticker_or_menu(bot, uid):
     import os
     import json
-    from utils.keyboards import get_persistent_menu
     
     # 1. Check if custom sticker is saved in database
     row = cur.execute("SELECT value FROM settings WHERE key='start_sticker'").fetchone()
@@ -22,7 +21,7 @@ async def send_start_sticker_or_menu(bot, uid):
                 access_hash=int(d['access_hash']),
                 file_reference=bytes.fromhex(d['file_reference'])
             )
-            return await bot.send_file(uid, doc, buttons=get_persistent_menu(uid))
+            return await bot.send_file(uid, doc)
         except Exception as ex:
             logger.warning(f"Failed to send saved sticker doc: {ex}")
 
@@ -31,7 +30,7 @@ async def send_start_sticker_or_menu(bot, uid):
         local_p = f"assets/start_sticker{ext}"
         if os.path.exists(local_p):
             try:
-                return await bot.send_file(uid, local_p, buttons=get_persistent_menu(uid))
+                return await bot.send_file(uid, local_p)
             except Exception as ex:
                 logger.warning(f"Failed to send local sticker {local_p}: {ex}")
 
