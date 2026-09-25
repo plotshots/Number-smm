@@ -19,7 +19,12 @@ from mongo_repository import MongoRepository
 from utils import auto_upi_verifier
 from utils.auto_upi_verifier import payment_not_found_text, payment_success_text
 from utils.imap_verifier import verify_auto_upi_order
-from plugins.deposit import _build_auto_upi_uri, generate_auto_upi_order_id, register_deposit
+from plugins.deposit import (
+    AUTO_UPI_CHECKING_TEXT,
+    _build_auto_upi_uri,
+    generate_auto_upi_order_id,
+    register_deposit,
+)
 
 
 class FakeImap:
@@ -76,7 +81,9 @@ def pending_order(purpose="ORD20260924TEST0001", amount=100):
 class CallbackBot:
     def __init__(self):
         self.handlers = []
-        self.send_message = AsyncMock()
+        self.send_message = AsyncMock(
+            return_value=SimpleNamespace(id=999, delete=AsyncMock())
+        )
 
     def on(self, _pattern):
         def decorator(handler):
@@ -155,10 +162,102 @@ class AutoUpiVerificationTests(unittest.TestCase):
                 asyncio.run(callback(event))
 
         self.assertEqual(verification.await_count, 2)
-        self.assertEqual(callback_bot.send_message.await_count, 2)
-        self.assertEqual([call.args[0:2] for call in callback_bot.send_message.await_args_list], [(7, payment_not_found_text())] * 2)
+        self.assertEqual(callback_bot.send_message.await_count, 4)
+        self.assertEqual(
+            [call.args[1] for call in callback_bot.send_message.await_args_list[::2]],
+            [AUTO_UPI_CHECKING_TEXT] * 2,
+        )
+        self.assertEqual(
+            [call.args[1] for call in callback_bot.send_message.await_args_list[1::2]],
+            [payment_not_found_text()] * 2,
+        )
         self.assertTrue(all(event.answer.await_count == 1 for event in events))
         self.assertTrue(all(event.message.edit.await_count == 0 for event in events))
+
+    def test_repeated_checks_delete_only_the_previous_result_before_verifying(self):
+        checking_messages = [
+            SimpleNamespace(id=101, delete=AsyncMock()),
+            SimpleNamespace(id=102, delete=AsyncMock()),
+            SimpleNamespace(id=103, delete=AsyncMock()),
+        ]
+        result_messages = [
+            SimpleNamespace(id=201, delete=AsyncMock()),
+            SimpleNamespace(id=202, delete=AsyncMock()),
+            SimpleNamespace(id=203, delete=AsyncMock()),
+        ]
+        callback_bot = CallbackBot()
+        callback_bot.send_message = AsyncMock(
+            side_effect=[message for pair in zip(checking_messages, result_messages) for message in pair]
+        )
+        callback_bot, callback = self.get_callback(callback_bot)
+        order = pending_order()
+        events = []
+
+        async def verify(_order, _bot, notify=False):
+            events.append("verify")
+            return {"status": "pending", "credited": False}
+
+        for _ in range(3):
+            event = SimpleNamespace(
+                sender_id=7,
+                message=SimpleNamespace(delete=AsyncMock(), edit=AsyncMock()),
+                answer=AsyncMock(),
+            )
+            events.append("click")
+            with patch("plugins.deposit.repository.get_current_pending_auto_upi_order", return_value=order), \
+                    patch("plugins.deposit.verify_pending_order", new=verify):
+                asyncio.run(callback(event))
+
+        self.assertEqual(callback_bot.send_message.await_count, 6)
+        self.assertEqual(checking_messages[0].delete.await_count, 1)
+        self.assertEqual(checking_messages[1].delete.await_count, 1)
+        self.assertEqual(checking_messages[2].delete.await_count, 1)
+        self.assertEqual(result_messages[0].delete.await_count, 1)
+        self.assertEqual(result_messages[1].delete.await_count, 1)
+        self.assertEqual(result_messages[2].delete.await_count, 0)
+        self.assertEqual(events, ["click", "verify", "click", "verify", "click", "verify"])
+
+    def test_previous_result_delete_failure_does_not_stop_verification(self):
+        first_result = SimpleNamespace(id=201, delete=AsyncMock(side_effect=RuntimeError("already gone")))
+        second_result = SimpleNamespace(id=202, delete=AsyncMock())
+        callback_bot = CallbackBot()
+        callback_bot.send_message = AsyncMock(side_effect=[
+            SimpleNamespace(id=203, delete=AsyncMock()), first_result,
+            SimpleNamespace(id=204, delete=AsyncMock()), second_result,
+        ])
+        callback_bot, callback = self.get_callback(callback_bot)
+        order = pending_order()
+        verification = AsyncMock(return_value={"status": "pending", "credited": False})
+
+        with patch("plugins.deposit.repository.get_current_pending_auto_upi_order", return_value=order), \
+                patch("plugins.deposit.verify_pending_order", new=verification):
+            asyncio.run(callback(SimpleNamespace(sender_id=7, message=SimpleNamespace(delete=AsyncMock()), answer=AsyncMock())))
+            asyncio.run(callback(SimpleNamespace(sender_id=7, message=SimpleNamespace(delete=AsyncMock()), answer=AsyncMock())))
+
+        self.assertEqual(verification.await_count, 2)
+        self.assertEqual(callback_bot.send_message.await_count, 4)
+        first_result.delete.assert_awaited_once_with()
+
+    def test_already_deleted_result_and_original_payment_message_are_ignored(self):
+        first_result = SimpleNamespace(id=301, delete=AsyncMock(side_effect=RuntimeError("message not found")))
+        callback_bot = CallbackBot()
+        callback_bot.send_message = AsyncMock(side_effect=[
+            SimpleNamespace(id=302, delete=AsyncMock()), first_result,
+            SimpleNamespace(id=303, delete=AsyncMock()), first_result,
+        ])
+        callback_bot, callback = self.get_callback(callback_bot)
+        order = pending_order()
+        original_message = SimpleNamespace(delete=AsyncMock(), edit=AsyncMock())
+        verification = AsyncMock(return_value={"status": "pending", "credited": False})
+
+        with patch("plugins.deposit.repository.get_current_pending_auto_upi_order", return_value=order), \
+                patch("plugins.deposit.verify_pending_order", new=verification):
+            asyncio.run(callback(SimpleNamespace(sender_id=7, message=original_message, answer=AsyncMock())))
+            asyncio.run(callback(SimpleNamespace(sender_id=7, message=original_message, answer=AsyncMock())))
+
+        self.assertEqual(verification.await_count, 2)
+        original_message.delete.assert_not_awaited()
+        original_message.edit.assert_not_awaited()
 
     def test_callback_sends_new_approved_message_without_editing(self):
         callback_bot, callback = self.get_callback()
@@ -169,7 +268,9 @@ class AutoUpiVerificationTests(unittest.TestCase):
                 patch("plugins.deposit.verify_pending_order", new=AsyncMock(return_value=result)):
             asyncio.run(callback(event))
 
-        callback_bot.send_message.assert_awaited_once_with(7, payment_success_text(100, 25, 125), buttons=None)
+        self.assertEqual(callback_bot.send_message.await_count, 2)
+        self.assertEqual(callback_bot.send_message.await_args_list[0].args[1], AUTO_UPI_CHECKING_TEXT)
+        self.assertEqual(callback_bot.send_message.await_args_list[1].args[1], payment_success_text(100, 25, 125))
         message.edit.assert_not_awaited()
 
     def test_callback_resolves_explicit_order_id_before_verification(self):
@@ -221,8 +322,11 @@ class AutoUpiVerificationTests(unittest.TestCase):
 
         self.assertEqual(first_balance, 10)
         self.assertEqual(repository.get_user(7)["balance"], 10)
-        self.assertEqual(callback_bot.send_message.await_count, 2)
-        self.assertTrue(all("𝐀ᴜᴛᴏ 𝐕ᴇʀɪғɪᴇᴅ" in call.args[1] for call in callback_bot.send_message.await_args_list))
+        self.assertEqual(callback_bot.send_message.await_count, 4)
+        self.assertTrue(all(
+            "𝐀ᴜᴛᴏ 𝐕ᴇʀɪғɪᴇᴅ" in call.args[1]
+            for call in callback_bot.send_message.await_args_list[1::2]
+        ))
         message.edit.assert_not_awaited()
 
     def test_background_notification_uses_existing_success_text(self):
