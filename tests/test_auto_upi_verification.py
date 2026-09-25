@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import mongomock
+from telethon.errors import MessageNotModifiedError
 
 os.environ.setdefault("API_ID", "1")
 os.environ.setdefault("API_HASH", "test-hash")
@@ -24,6 +25,7 @@ from plugins.deposit import (
     AUTO_UPI_VERIFICATION_TIMEOUT_SECONDS,
     _build_auto_upi_uri,
     _edit_auto_upi_status_message,
+    _update_auto_upi_status_message,
     generate_auto_upi_order_id,
     register_deposit,
 )
@@ -406,6 +408,42 @@ class AutoUpiVerificationTests(unittest.TestCase):
         self.assertFalse(result)
         callback.answer.assert_not_awaited()
         log_exception.assert_called()
+
+    def test_status_edit_treats_message_not_modified_as_success(self):
+        callback_message = SimpleNamespace(
+            id=12,
+            message="already current",
+            buttons=None,
+            photo=None,
+            edit=AsyncMock(side_effect=MessageNotModifiedError(None)),
+        )
+        callback = SimpleNamespace(sender_id=7, message=callback_message)
+
+        result = asyncio.run(_edit_auto_upi_status_message(callback, "updated"))
+
+        self.assertTrue(result)
+
+    def test_status_edit_failure_deletes_and_reuses_one_replacement(self):
+        old_message = SimpleNamespace(
+            id=13,
+            message="old status",
+            buttons=None,
+            photo=None,
+            edit=AsyncMock(side_effect=RuntimeError("inaccessible")),
+            delete=AsyncMock(),
+        )
+        replacement = SimpleNamespace(id=14, edit=AsyncMock())
+        telegram_bot = SimpleNamespace(send_message=AsyncMock(return_value=replacement))
+        callback = SimpleNamespace(sender_id=7, message=old_message)
+        status_key = (7, "ORD-REPLACEMENT")
+
+        asyncio.run(_update_auto_upi_status_message(telegram_bot, callback, status_key, AUTO_UPI_CHECKING_TEXT))
+        callback.message = old_message
+        asyncio.run(_update_auto_upi_status_message(telegram_bot, callback, status_key, "final status"))
+
+        old_message.delete.assert_awaited_once_with()
+        telegram_bot.send_message.assert_awaited_once_with(7, AUTO_UPI_CHECKING_TEXT, buttons=None)
+        replacement.edit.assert_awaited_once_with("final status", buttons=None)
 
     def test_check_status_sends_checking_and_final_messages_without_callback_message(self):
         class CallbackBot:

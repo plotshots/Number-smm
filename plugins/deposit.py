@@ -134,7 +134,11 @@ async def _edit_auto_upi_status_message(callback_query, text, buttons=None, targ
     )
     current_text = getattr(target_message, "message", None)
     if current_text == text and _auto_upi_button_signature(getattr(target_message, "buttons", None)) == _auto_upi_button_signature(buttons):
-        return False
+        logger.info(
+            "[AUTO_UPI_CHECK] message already in requested state message_id=%s",
+            getattr(target_message, "id", None),
+        )
+        return True
 
     edit_kind = "caption" if is_photo_message else "text"
     logger.info("[AUTO_UPI_CHECK] editing %s status message", edit_kind)
@@ -145,15 +149,17 @@ async def _edit_auto_upi_status_message(callback_query, text, buttons=None, targ
             await target_message.edit_text(text, buttons=buttons)
         else:
             await target_message.edit(text, buttons=buttons)
+        logger.info(
+            "[AUTO_UPI_CHECK] edit succeeded message_id=%s",
+            getattr(target_message, "id", None),
+        )
         return True
     except MessageNotModifiedError:
-        current_text = getattr(target_message, "message", None)
-        current_buttons = _auto_upi_button_signature(getattr(target_message, "buttons", None))
-        requested_buttons = _auto_upi_button_signature(buttons)
-        if current_text == text and current_buttons == requested_buttons:
-            return False
-        logger.exception("[AUTO_UPI_CHECK] unexpected MessageNotModifiedError while editing")
-        return False
+        logger.info(
+            "[AUTO_UPI_CHECK] message already in requested state message_id=%s",
+            getattr(target_message, "id", None),
+        )
+        return True
     except Exception:
         logger.exception(
             "[AUTO_UPI_CHECK] %s message edit failed: user_id=%s message_id=%s",
@@ -170,6 +176,24 @@ async def _send_auto_upi_status_message(telegram_bot, user_id, text, buttons=Non
     except Exception:
         logger.exception("[AUTO_UPI_CHECK] status message fallback failed: user_id=%s", user_id)
         return None
+
+
+async def _delete_auto_upi_status_message(target_message):
+    if target_message is None:
+        return
+    try:
+        delete = getattr(target_message, "delete", None)
+        if delete is not None:
+            await delete()
+            logger.info(
+                "[AUTO_UPI_CHECK] old status message deleted message_id=%s",
+                getattr(target_message, "id", None),
+            )
+    except Exception:
+        logger.info(
+            "[AUTO_UPI_CHECK] old status message delete failed message_id=%s",
+            getattr(target_message, "id", None),
+        )
 
 
 async def _update_auto_upi_status_message(telegram_bot, callback_query, status_key, text, buttons=None):
@@ -189,8 +213,11 @@ async def _update_auto_upi_status_message(telegram_bot, callback_query, status_k
             }
             return target_message, True, False
 
-        if stored_status:
-            return target_message, False, False
+        logger.info(
+            "[AUTO_UPI_CHECK] edit failed, attempting replacement message message_id=%s",
+            getattr(target_message, "id", None),
+        )
+        await _delete_auto_upi_status_message(target_message)
 
         fallback_message = await _send_auto_upi_status_message(
             telegram_bot,
@@ -203,6 +230,10 @@ async def _update_auto_upi_status_message(telegram_bot, callback_query, status_k
                 "id": getattr(fallback_message, "id", None),
                 "message": fallback_message,
             }
+            logger.info(
+                "[AUTO_UPI_CHECK] replacement status message sent message_id=%s",
+                getattr(fallback_message, "id", None),
+            )
             return fallback_message, False, True
         return None, False, False
 
