@@ -4,6 +4,7 @@ import urllib.parse
 import unittest
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -19,10 +20,14 @@ from mongo_repository import MongoRepository
 from utils import auto_upi_verifier
 from utils.auto_upi_verifier import payment_not_found_text, payment_success_text
 from utils.imap_verifier import verify_auto_upi_order
+from utils.states import deposit_input, waiting_proof
+from plugins import deposit as deposit_plugin
 from plugins.deposit import (
     AUTO_UPI_CHECKING_TEXT,
     _build_auto_upi_uri,
     generate_auto_upi_order_id,
+    get_keypad,
+    manual_deposit_init,
     register_deposit,
 )
 
@@ -93,6 +98,15 @@ class CallbackBot:
 
 
 class AutoUpiVerificationTests(unittest.TestCase):
+    def test_background_verifier_is_not_started_or_scheduled(self):
+        verifier_source = Path(auto_upi_verifier.__file__).read_text()
+        main_source = Path(__file__).parents[1].joinpath("main.py").read_text()
+
+        self.assertNotIn("VERIFICATION_INTERVAL_SECONDS", verifier_source)
+        self.assertNotIn("_verification_loop", verifier_source)
+        self.assertNotIn("asyncio.create_task", verifier_source)
+        self.assertNotIn("start_auto_upi_verifier", main_source)
+
     def verify_email(self, order, raw_message):
         FakeImap.raw_messages = [raw_message]
         with patch("utils.imap_verifier.get_imap_credentials", return_value=("test@example.com", "test-password")), \
@@ -103,6 +117,36 @@ class AutoUpiVerificationTests(unittest.TestCase):
         callback_bot = callback_bot or CallbackBot()
         register_deposit(callback_bot)
         return callback_bot, next(handler for handler in callback_bot.handlers if handler.__name__ == "cb_auto_upi_check")
+
+    def test_manual_upi_starts_with_the_same_amount_keypad(self):
+        event = SimpleNamespace(sender_id=7, edit=AsyncMock())
+        deposit_input.pop(7, None)
+        try:
+            asyncio.run(manual_deposit_init(event, "ManualUPI"))
+            self.assertEqual(deposit_input[7], {"step": "keypad", "method": "ManualUPI", "amount": ""})
+            self.assertEqual(event.edit.await_args.kwargs["buttons"], get_keypad())
+        finally:
+            deposit_input.pop(7, None)
+
+    def test_manual_upi_keypad_confirmation_enters_existing_proof_flow(self):
+        callback_bot = CallbackBot()
+        register_deposit(callback_bot)
+        callback = next(handler for handler in callback_bot.handlers if handler.__name__ == "cb_auto_upi_keypad")
+        deposit_input[7] = {"step": "keypad", "method": "ManualUPI", "amount": "125"}
+        event = SimpleNamespace(
+            sender_id=7,
+            pattern_match=SimpleNamespace(group=lambda _index: b"done"),
+            answer=AsyncMock(),
+        )
+        with patch("plugins.deposit.cur.execute", return_value=SimpleNamespace(fetchone=lambda: None)), \
+                patch("plugins.deposit.get_usdt_rate", return_value=1), \
+                patch.object(deposit_plugin.bot, "send_file", new=AsyncMock()):
+            try:
+                asyncio.run(callback(event))
+                self.assertEqual(waiting_proof[7], {"amount": 125, "method": "ManualUPI"})
+            finally:
+                deposit_input.pop(7, None)
+                waiting_proof.pop(7, None)
 
     def test_matches_current_order_purpose_and_amount(self):
         order = pending_order()

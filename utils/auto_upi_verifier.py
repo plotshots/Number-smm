@@ -1,13 +1,8 @@
-import asyncio
 from datetime import datetime, timezone
 
 from database import repository
 from config import logger, bot
 from utils.imap_verifier import verify_auto_upi_order
-
-VERIFICATION_INTERVAL_SECONDS = 20
-_verifier_task = None
-
 
 def _is_expired(order):
     expires_at = order.get("expires_at")
@@ -130,26 +125,3 @@ async def verify_pending_order(order, telegram_bot=bot, notify=True):
         "result": result,
     }
 
-
-async def _verification_loop(telegram_bot):
-    while True:
-        try:
-            for order in repository.get_pending_auto_upi_orders():
-                try:
-                    await verify_pending_order(order, telegram_bot)
-                except Exception:
-                    logger.exception("Auto UPI background verification failed: order_id=%s", order.get("order_id"))
-            await asyncio.sleep(VERIFICATION_INTERVAL_SECONDS)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("Auto UPI background verifier loop failed")
-            await asyncio.sleep(VERIFICATION_INTERVAL_SECONDS)
-
-
-def start_auto_upi_verifier(telegram_bot=bot):
-    """Start at most one process-local verifier task."""
-    global _verifier_task
-    if _verifier_task is None or _verifier_task.done():
-        _verifier_task = asyncio.create_task(_verification_loop(telegram_bot), name="auto-upi-verifier")
-    return _verifier_task

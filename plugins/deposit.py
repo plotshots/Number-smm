@@ -118,7 +118,7 @@ async def deposit_menu(event):
     else: await event.respond(msg, buttons=btns)
 
 async def manual_deposit_init(event, method):
-    if method == "AutoUPI":
+    if method in ("AutoUPI", "ManualUPI"):
         uid = event.sender_id
         deposit_input[uid] = {'step': 'keypad', 'method': method, 'amount': ''}
         return await event.edit(
@@ -378,7 +378,7 @@ def register_deposit(bot):
     async def cb_auto_upi_keypad(e):
         uid = e.sender_id
         state = deposit_input.get(uid)
-        if not state or state.get('step') != 'keypad' or state.get('method') != 'AutoUPI':
+        if not state or state.get('step') != 'keypad' or state.get('method') not in ("AutoUPI", "ManualUPI"):
             return await e.answer("This payment session has expired.", alert=True)
 
         key = e.pattern_match.group(1).decode()
@@ -394,6 +394,13 @@ def register_deposit(bot):
                 return await e.answer("Minimum recharge is ₹10.", alert=True)
             if parsed_amount > 50000:
                 return await e.answer("Maximum recharge is ₹50,000.", alert=True)
+            if state.get('method') == "ManualUPI":
+                state['step'] = 'wait_amt'
+                try:
+                    await msg_wait_amt(e, amount_override=parsed_amount)
+                except events.StopPropagation:
+                    pass
+                return
             deposit_input.pop(uid, None)
             await e.answer("Payment created", alert=False)
             return await create_auto_upi_payment(e, parsed_amount)
@@ -405,12 +412,12 @@ def register_deposit(bot):
             pass
 
     @bot.on(events.NewMessage(func=lambda e: e.sender_id in deposit_input and deposit_input[e.sender_id]['step'] == 'wait_amt'))
-    async def msg_wait_amt(e):
+    async def msg_wait_amt(e, amount_override=None):
         uid = e.sender_id
-        text = (e.text or "").strip()
+        text = str(amount_override) if amount_override is not None else (e.text or "").strip()
         
         # Check if user sent photo/document/link/letters instead of pure numbers
-        if e.photo or e.document or e.media or not text.isdigit():
+        if amount_override is None and (e.photo or e.document or e.media or not text.isdigit()):
             return await e.reply(f"<blockquote>{P_NO} <b>❌ 𝐈ɴᴠᴀʟɪᴅ 𝐀ᴍᴏᴜɴᴛ!</b>\n\n"
                                  f"𝐏ʟᴇᴀsᴇ ᴇɴᴛᴇʀ a valid <b>numeric amount</b> (digits only, e.g. <code>50</code>, <code>100</code>, <code>500</code>).\n"
                                  f"<i>𝐋ɪɴᴋs, sᴄʀᴇᴇɴsʜᴏᴛs, ʟᴇᴛᴛᴇʀs ᴏʀ sᴘᴇᴄɪᴀʟ ᴄʜᴀʀᴀᴄᴛᴇʀs ᴀʀᴇ ɴᴏᴛ ᴀʟʟᴏᴡᴇᴅ.</i></blockquote>",
