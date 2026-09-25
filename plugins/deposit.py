@@ -22,6 +22,18 @@ from utils.auto_upi_verifier import (
 
 AUTO_UPI_VERIFICATION_TIMEOUT_SECONDS = 45
 AUTO_UPI_CHECKING_TEXT = "⏳ 𝐂ʜᴇᴄᴋɪɴɢ ʏᴏᴜʀ 𝐏ᴀʏᴍᴇɴᴛ..."
+_AUTO_UPI_STATUS_MESSAGES = {}
+_AUTO_UPI_STATUS_LOCKS = {}
+_AUTO_UPI_VERIFICATION_LOCKS = {}
+_AUTO_UPI_RUNNING_VERIFICATIONS = set()
+
+
+def _auto_upi_status_key(user_id, order_id):
+    return int(user_id), str(order_id) if order_id is not None else None
+
+
+def _auto_upi_status_lock(lock_map, key):
+    return lock_map.setdefault(key, asyncio.Lock())
 
 async def deposit_menu(event):
     btns = [
@@ -159,6 +171,41 @@ async def _send_auto_upi_status_message(telegram_bot, user_id, text, buttons=Non
         logger.exception("[AUTO_UPI_CHECK] status message fallback failed: user_id=%s", user_id)
         return None
 
+
+async def _update_auto_upi_status_message(telegram_bot, callback_query, status_key, text, buttons=None):
+    async with _auto_upi_status_lock(_AUTO_UPI_STATUS_LOCKS, status_key):
+        stored_status = _AUTO_UPI_STATUS_MESSAGES.get(status_key)
+        target_message = stored_status["message"] if stored_status else getattr(callback_query, "message", None)
+        edited = await _edit_auto_upi_status_message(
+            callback_query,
+            text,
+            buttons=buttons,
+            target_message=target_message,
+        )
+        if edited:
+            _AUTO_UPI_STATUS_MESSAGES[status_key] = {
+                "id": getattr(target_message, "id", None),
+                "message": target_message,
+            }
+            return target_message, True, False
+
+        if stored_status:
+            return target_message, False, False
+
+        fallback_message = await _send_auto_upi_status_message(
+            telegram_bot,
+            callback_query.sender_id,
+            text,
+            buttons=buttons,
+        )
+        if fallback_message is not None:
+            _AUTO_UPI_STATUS_MESSAGES[status_key] = {
+                "id": getattr(fallback_message, "id", None),
+                "message": fallback_message,
+            }
+            return fallback_message, False, True
+        return None, False, False
+
 # We will skip the automated UPI part in this script to save space if needed, 
 # or I can port it directly. The user had a keypad logic for UPI amounts.
 def get_keypad():
@@ -235,6 +282,11 @@ async def create_auto_upi_payment(event, amount):
         await bot.send_message(uid, "❌ Unable to generate the payment QR right now. Please try again.")
 
 def register_deposit(bot):
+    _AUTO_UPI_STATUS_MESSAGES.clear()
+    _AUTO_UPI_STATUS_LOCKS.clear()
+    _AUTO_UPI_VERIFICATION_LOCKS.clear()
+    _AUTO_UPI_RUNNING_VERIFICATIONS.clear()
+
     @bot.on(events.NewMessage(pattern=r"(?i)^(💳 𝐃ᴇᴘᴏsɪᴛ|💳 Deposit)$"))
     async def msg_deposit(e):
         await deposit_menu(e)
@@ -264,22 +316,25 @@ def register_deposit(bot):
         else:
             logger.info("[AUTO_UPI_CHECK] callback answered")
 
-        checking_text = AUTO_UPI_CHECKING_TEXT
-        logger.info("[AUTO_UPI_CHECK] setting checking state")
-        checking_message = getattr(e, "message", None)
-        checking_shown = await _edit_auto_upi_status_message(e, checking_text, target_message=checking_message)
-        if checking_shown:
-            logger.info("[AUTO_UPI_CHECK] checking message edited")
-        else:
-            checking_message = await _send_auto_upi_status_message(bot, e.sender_id, checking_text)
-            if checking_message is not None:
-                logger.info("[AUTO_UPI_CHECK] checking message fallback sent")
-
         order = repository.get_auto_upi_order(e.sender_id, order_id) if order_id else repository.get_current_pending_auto_upi_order(e.sender_id)
         pending_order = order if order and order.get("status") == "pending" else None
         resolved_order_id = order.get("order_id") if order else order_id
+        status_key = _auto_upi_status_key(e.sender_id, resolved_order_id)
         logger.info("[AUTO_UPI_CHECK] order found=%s order_id=%s", bool(order), resolved_order_id)
         logger.info("[AUTO_UPI_CHECK] order status=%s", order.get("status") if order else None)
+
+        checking_text = AUTO_UPI_CHECKING_TEXT
+        logger.info("[AUTO_UPI_CHECK] setting checking state")
+        checking_message, checking_edited, checking_fallback_sent = await _update_auto_upi_status_message(
+            bot,
+            e,
+            status_key,
+            checking_text,
+        )
+        if checking_edited:
+            logger.info("[AUTO_UPI_CHECK] checking message edited")
+        elif checking_fallback_sent:
+            logger.info("[AUTO_UPI_CHECK] checking message fallback sent")
 
         if not pending_order:
             if order and order.get("status") == "expired":
@@ -296,15 +351,24 @@ def register_deposit(bot):
             else:
                 logger.info("[AUTO_UPI_CHECK] setting final result=not_found")
                 final_text = payment_not_found_text()
-            final_edited = await _edit_auto_upi_status_message(e, final_text, target_message=checking_message)
+            _, final_edited, final_fallback_sent = await _update_auto_upi_status_message(
+                bot,
+                e,
+                status_key,
+                final_text,
+            )
             if final_edited:
                 logger.info("[AUTO_UPI_CHECK] final result edited")
-            else:
-                final_message = await _send_auto_upi_status_message(bot, e.sender_id, final_text)
-                if final_message is not None:
-                    logger.info("[AUTO_UPI_CHECK] final result fallback sent")
+            elif final_fallback_sent:
+                logger.info("[AUTO_UPI_CHECK] final result fallback sent")
             logger.info("[AUTO_UPI_CHECK] callback completed")
             return
+
+        async with _auto_upi_status_lock(_AUTO_UPI_VERIFICATION_LOCKS, status_key):
+            if status_key in _AUTO_UPI_RUNNING_VERIFICATIONS:
+                logger.info("[AUTO_UPI_CHECK] verification already running order_id=%s", resolved_order_id)
+                return
+            _AUTO_UPI_RUNNING_VERIFICATIONS.add(status_key)
 
         logger.info("[AUTO_UPI_CHECK] verification started order_id=%s", resolved_order_id)
         try:
@@ -318,17 +382,18 @@ def register_deposit(bot):
             final_text = (
                 "⚠️ <b>Payment verification timed out.</b>\nPlease try again shortly."
             )
-            final_edited = await _edit_auto_upi_status_message(
+            _, final_edited, final_fallback_sent = await _update_auto_upi_status_message(
+                bot,
                 e,
+                status_key,
                 final_text,
-                target_message=checking_message,
             )
             if final_edited:
                 logger.info("[AUTO_UPI_CHECK] final result edited")
-            else:
-                final_message = await _send_auto_upi_status_message(bot, e.sender_id, final_text)
-                if final_message is not None:
-                    logger.info("[AUTO_UPI_CHECK] final result fallback sent")
+            elif final_fallback_sent:
+                logger.info("[AUTO_UPI_CHECK] final result fallback sent")
+            async with _auto_upi_status_lock(_AUTO_UPI_VERIFICATION_LOCKS, status_key):
+                _AUTO_UPI_RUNNING_VERIFICATIONS.discard(status_key)
             logger.info("[AUTO_UPI_CHECK] callback completed")
             return
         except Exception:
@@ -336,17 +401,18 @@ def register_deposit(bot):
             final_text = (
                 "⚠️ <b>Payment verification is temporarily unavailable.</b>\nPlease try again shortly."
             )
-            final_edited = await _edit_auto_upi_status_message(
+            _, final_edited, final_fallback_sent = await _update_auto_upi_status_message(
+                bot,
                 e,
+                status_key,
                 final_text,
-                target_message=checking_message,
             )
             if final_edited:
                 logger.info("[AUTO_UPI_CHECK] final result edited")
-            else:
-                final_message = await _send_auto_upi_status_message(bot, e.sender_id, final_text)
-                if final_message is not None:
-                    logger.info("[AUTO_UPI_CHECK] final result fallback sent")
+            elif final_fallback_sent:
+                logger.info("[AUTO_UPI_CHECK] final result fallback sent")
+            async with _auto_upi_status_lock(_AUTO_UPI_VERIFICATION_LOCKS, status_key):
+                _AUTO_UPI_RUNNING_VERIFICATIONS.discard(status_key)
             logger.info("[AUTO_UPI_CHECK] callback completed")
             return
 
@@ -375,23 +441,19 @@ def register_deposit(bot):
             logger.info("[AUTO_UPI_CHECK] setting final result=not_found")
             final_buttons = not_found_buttons
             final_text = payment_not_found_text()
-        final_edited = await _edit_auto_upi_status_message(
+        _, final_edited, final_fallback_sent = await _update_auto_upi_status_message(
+            bot,
             e,
+            status_key,
             final_text,
             buttons=final_buttons,
-            target_message=checking_message,
         )
         if final_edited:
             logger.info("[AUTO_UPI_CHECK] final result edited")
-        else:
-            final_message = await _send_auto_upi_status_message(
-                bot,
-                e.sender_id,
-                final_text,
-                buttons=final_buttons,
-            )
-            if final_message is not None:
-                logger.info("[AUTO_UPI_CHECK] final result fallback sent")
+        elif final_fallback_sent:
+            logger.info("[AUTO_UPI_CHECK] final result fallback sent")
+        async with _auto_upi_status_lock(_AUTO_UPI_VERIFICATION_LOCKS, status_key):
+            _AUTO_UPI_RUNNING_VERIFICATIONS.discard(status_key)
         logger.info("[AUTO_UPI_CHECK] callback completed")
 
     @bot.on(events.CallbackQuery(pattern=b"^auto_upi_cancel$"))
