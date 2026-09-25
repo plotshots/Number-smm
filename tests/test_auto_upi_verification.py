@@ -407,6 +407,64 @@ class AutoUpiVerificationTests(unittest.TestCase):
         callback.answer.assert_not_awaited()
         log_exception.assert_called()
 
+    def test_check_status_sends_checking_and_final_messages_without_callback_message(self):
+        class CallbackBot:
+            def __init__(self):
+                self.handlers = []
+                self.checking_message = SimpleNamespace(edit=AsyncMock())
+                self.send_message = AsyncMock(return_value=self.checking_message)
+
+            def on(self, _pattern):
+                def decorator(handler):
+                    self.handlers.append(handler)
+                    return handler
+                return decorator
+
+        callback_bot = CallbackBot()
+        register_deposit(callback_bot)
+        callback = next(handler for handler in callback_bot.handlers if handler.__name__ == "cb_auto_upi_check")
+        event = SimpleNamespace(sender_id=7, answer=AsyncMock())
+        with patch("plugins.deposit.repository.get_current_pending_auto_upi_order", return_value=pending_order()), \
+                patch("plugins.deposit.verify_pending_order", new=AsyncMock(return_value={"status": "pending"})):
+            asyncio.run(callback(event))
+
+        event.answer.assert_awaited_once_with()
+        self.assertEqual(callback_bot.send_message.await_count, 1)
+        self.assertEqual(callback_bot.send_message.await_args_list[0].args, (7, AUTO_UPI_CHECKING_TEXT))
+        self.assertIn("𝐏ᴀʏᴍᴇɴᴛ 𝐍ᴏᴛ 𝐅ᴏᴜɴᴅ", callback_bot.checking_message.edit.await_args.args[0])
+
+    def test_check_status_uses_checking_fallback_message_for_final_edit(self):
+        class CallbackBot:
+            def __init__(self):
+                self.handlers = []
+                self.checking_message = SimpleNamespace(edit=AsyncMock())
+                self.send_message = AsyncMock(return_value=self.checking_message)
+
+            def on(self, _pattern):
+                def decorator(handler):
+                    self.handlers.append(handler)
+                    return handler
+                return decorator
+
+        callback_bot = CallbackBot()
+        register_deposit(callback_bot)
+        callback = next(handler for handler in callback_bot.handlers if handler.__name__ == "cb_auto_upi_check")
+        callback_message = SimpleNamespace(
+            message="payment status",
+            buttons=None,
+            photo=None,
+            id=1,
+            edit=AsyncMock(side_effect=RuntimeError("message unavailable")),
+        )
+        event = SimpleNamespace(sender_id=7, message=callback_message, answer=AsyncMock())
+        result = {"status": "paid", "result": {"amount": 100, "previous_balance": 25, "balance": 125}}
+        with patch("plugins.deposit.repository.get_current_pending_auto_upi_order", return_value=pending_order()), \
+                patch("plugins.deposit.verify_pending_order", new=AsyncMock(return_value=result)):
+            asyncio.run(callback(event))
+
+        self.assertEqual(callback_bot.send_message.await_count, 1)
+        self.assertIn("𝐃ᴇᴘᴏsɪᴛ 𝐀ᴘᴘʀᴏᴠᴇᴅ", callback_bot.checking_message.edit.await_args.args[0])
+
     def test_paid_order_status_lookup_does_not_credit_again(self):
         paid_order = pending_order()
         paid_order.update({
